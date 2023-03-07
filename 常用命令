@@ -1,0 +1,181 @@
+#查看组及版本命令
+查看节点
+    kubectl get nodes
+
+查看名称空间下的pod
+    kubectl get -n kube-flannel pods
+
+查看组:
+    kubectl api-versions
+
+查看所有的资源组类型：
+    kubectl api-resources
+
+查看某个组下的类型或资源类型下的版本：
+    kubectl api-resources --api-group=events.k8s.io[/v1]
+
+查看资源类型下的字段：
+    kubectl explain pod.spec
+
+了解某资源类型API规范的命令：
+    kubectl explain KIND
+
+查看名称空间
+    kubectl get ns  
+
+#指令式命令
+仅打印资源清单
+    kubectl create deployment demoapp --image=ikubertes/demoapp:v1.0 --port=80 --dry-run=client --replicas=3 -o yaml
+
+创建deployment对象
+    kubectl create deployment demoapp --image=ikubertes/demoapp:v1.0 --port=80  --replicas=3
+
+了解完整的资源规范及状态
+    kubectl get deployment [-o yaml | json]
+
+了解Pod对象的相关信息
+    kubectl get pods -l app=demoapp -o wide
+
+查看pods
+kubectl get pods
+
+删除pod
+    kubectl delete deployment jenkins2 -n jenkins
+    kubectl delete -f k8s/deployment-dempapp.yaml
+
+强制删除
+    kubectl delete -f k8s/deployment-dempapp.yaml --force --grace-period=0
+
+显示pod的完整格式 [ wide:显示详细信息 ]
+    kubectl get pods -o wide demoapp-55c5f88dcb-7648n -o yaml
+
+列出所有符合 [ deployment ]的资源
+    kubectl get deployments -o wide
+    kubectl get deployments demoapp -o yaml
+    kubectl get -f k8s/deployment-dempapp.yaml
+
+只删除pod，yaml文件还存在
+    kubectl delete -f k8s/deployment-dempapp.yaml
+
+# service
+kubectl create service --help
+
+创建service
+    kubectl create service clusterip demoapp --tcp=80:80 --dry-run=client -o yaml
+
+显示pod上的标签
+    kubectl get pods --show-labels
+
+显示service信息
+    kubectl get service
+    kubectl get service demoapp
+    kubectl get service demoapp -o wide
+    kubectl get service demoapp -o yaml
+
+资源详细状态信息的查看命令
+    kubectl describe RESOURCES NAME 
+    kubectl describe pods demoapp
+    kubectl describe service demoapp
+    kubectl describe deployment demoapp
+
+查看 pod 运行在哪个后端端点
+    kubectl get endpoints demoapp -o wide
+
+进入 pod 下容器的交互式接口
+    kubectl exec -it demoapp-55c5f88dcb-2fftc [ -c ] -- /bin/sh
+
+非交互
+     kubectl exec demoapp -- netstat -tnl
+
+#Pod
+获取Pod中容器应用的日志,service没有日志
+    kubectl logs demoapp demoapp
+    
+获取Pod中多个容器的日志
+    kubectl logs demoapp -c demoapp
+
+打印Pod资源的详细状态
+    kubectl describe TYPE NAME
+    kubectl describe pods demoapp
+
+查看多个不同的资源:pod和deployments资源下的对象
+    kubectl get pods/pod-demoapp deployments/demoapp
+
+所有类型下的所有资源
+    kubectl get all
+     
+# 名称空间
+创建名称空间
+     kubectl create namespace demoapp
+
+查看名称空间
+    kubectl get namespace 【ns】
+
+删除名称空间[连空间下的数据都会删除]
+    kubectl delete namespace demoapp
+
+查看名称空间的标签
+    kubectl get namespace --show-labels
+
+# lables
+查看labels
+    kubectl get TYPE [NAME] --show-labels
+
+添加label
+    kubectl label TYPE NAME key=value1 [key2=value2 ...]
+    kubectl label namespace demoapp environment=product
+    kubectl label pods nginx  app=demoapp -n demo
+
+删除标签
+    kubectl label TYPE NAME key- [key2- ...]
+    kubectl label namespace demoapp environment-
+
+标签过滤
+    kubectl get pods -l app=myapp 
+    kubectl get pods -l app=demoapp --show-labels
+    kubectl get pods -l 'app!=demoapp' --show-labels
+    kubectl get pods -l 'app in (deoapp,myapp,testapp)' --show-labels
+    kubectl get pods -l 'app not in (deoapp,myapp,testapp)' --show-labels
+    kubectl get pods -l 'app' --show-labels
+    kubectl get pods -l '!app' --show-labels
+
+
+# PV和pvc
+查看资源类型下的字段：
+    kubectl explain pvc.spec.accessModes
+
+# 查看pv
+    kubectl get pv
+
+# 查看pvc
+    kubectl get pvc
+
+# 查看secret
+    kubectl get sdemoapp-55c5f88dcb-9drfhecret
+
+# run 启动一个测试客户端pod
+    kubectl run clinet-$RANDOM --image ikubertes/admin-box:v1.2 --restart=Never --rm -it --command --/bin/bash
+
+# deployment
+    kubectl create deployment demoapp --image ikubernetes/demoapp:v1.0 --replicas 2 --dry-run=client -o yaml
+
+
+# 查看容器内环境变量
+    kubectl exec -it configmaps-volume-demo -- printenv
+
+# 查看默认的strategy的参数
+    kubectl describe deployment demo -n demo
+
+# rollout
+查看历史
+    kubectl rollout history deployment -n demo
+查看更新的状态
+    kubectl rollout status deployment demo -n demo
+暂停操作，做金丝雀发布
+    kubectl apply -f deployment-strategy.yaml && kubectl rollout pause deployment demo -n demo
+继续操作并且查看状态
+    kubectl rollout resume deployment demo -n demo && kubectl rollout status deployment demo -n demo
+回滚，回滚上一个版本
+    kubectl rollout undo deployment demo -n demo
+回滚到指定版本
+    kubectl rollout undo --to-revision=1 deployment demo -n demo

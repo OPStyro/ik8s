@@ -1,0 +1,26 @@
+1、docker从国外下载镜像
+    https://segmentfault.com/a/1190000041874568
+
+2、动态创建pv失败，显示内容如下：
+waiting for a volume to be created, either by external provisioner "nfs.csi.k8s.io" or manually created by system administrator
+    需要在/etc/kubernetes/manifests/kube-apiserver.yaml 添加参数:
+    - --feature-gates=RemoveSelfLink=false
+
+    apiVersion: storage.k8s.io/v1
+    kind: StorageClass
+    metadata:
+    name: nfs-csi
+    provisioner: nfs.csi.k8s.io
+    parameters:
+    #  server: nfs-server.default.svc.cluster.local
+    #  server: nfs-server.nfs.svc.cluster.local
+      server: 10.244.2.2                                #指定nfs-server的ip地址就好了，但是这个ip地址是静态的
+      share: /
+    # csi.storage.k8s.io/provisioner-secret is only needed for providing mountOptions in DeleteVolume
+    # csi.storage.k8s.io/provisioner-secret-name: "mount-options"
+    # csi.storage.k8s.io/provisioner-secret-namespace: "default"
+    reclaimPolicy: Retain
+    volumeBindingMode: Immediate
+    mountOptions:
+      - hard
+      - nfsvers=4.1

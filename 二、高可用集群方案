@@ -1,0 +1,48 @@
+kubertes系统组件：
+        分布式：运行于多个主机上
+        这多个主机分俩类：
+            Master：决策和控制中心
+                kube-apiserver：API网关，无状态，k8s管控通信的唯一出入口，资源的增删改查必须走的唯一入口
+                ectd：状态存储，灵活自由的KV存储，所有的数据必须从apiserver上获取，每一个资源类型就是一个表结构
+                kube-controller-manager：控制器管理器
+                kube-scheduler：调度器，负载调度未完成绑定的Pod
+                    调度：将Pod与某个Node建立绑定关系
+                celaster-controller：可用可无，部署在IAAS云上的时候，与底层上的云API交互的时候，借助底层的云来完成功能
+
+            Worker：执行组件
+                kubelete：负责Pod生命周期管理，任何Pod
+                    CRI：对接外部的容器运行时，比如cri-dockerd和docker-ce，containerd、cri-o
+                    CNI：对接外部的虚拟【容器】网络，比如：flannel【kubenet已经被抛弃了】、Calico、Cilium（eBPF）
+                        借助于 Underlay，Overlay 俩种类型来构建网络，依赖节点网络
+
+                    CSI：对接外部的存储服务，通常是共享存储服务，比如：nfs-driver【NFS】、Ceph
+                kube-proxy：Service功能在节点级的落地，具体来说，就是把Service的定义转换为节点上的iptables、ipvs规则
+
+Mster高可用：
+    每个组件独立实现其自向的高可用机制
+        etcd：分布式高一致性kv存储，raft协议
+            奇数节点：3，5，7
+            etcd官方文档硬件推荐：https://etcd.io/docs/v3.5/op-guide/hardware
+        apiserver：无状态，2+
+            应该为其提供负载均衡器
+            https协议，而且客户端与apiserver需要直接建立tls会话，LB通常要做tcp级的负载均衡
+        controller-manager：选举出一个primary节点，余下的为Secondary
+            leader election:抢占式选举
+        scheduler：选举出一个primary节点，余下的为Secondary
+            leader election:抢占式选举
+
+    生产可用部署方式：
+        etcd：独立部署：5+节点
+            etcd：3个节点
+            master：2+节点集群
+        etcd与Master的组件部署在一起：堆叠式，3+节点集群
+            每个节点都不分etcd，master组件
+
+
+SRE：Site Reliable Engineering 站点可靠工程。提高应用的可靠性，确保服务的可用性
+    A = MTBF/(MTBF+MTTR)
+
+    MTBF：可用时常
+    MTTR: 修复时常
+
+    利用监控进行回滚操作

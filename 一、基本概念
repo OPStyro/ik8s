@@ -1,0 +1,2009 @@
+kubernetes是一个云原生OS,分布式操作系统运行在多台主机上,是一个资源池
+    kubertes系统组件：
+        分布式：运行于多个主机上
+        这多个主机分俩类：
+            Master：决策和控制中心
+                kube-apiserver：API网关，无状态，k8s管理通信的唯一出入口，资源的增删改查必须走的唯一入口
+                etcd：状态存储，灵活自由的KV存储，所有的数据必须从apiserver上获取，每一个资源类型就是一个表结构
+                kube-controller-manager：控制器管理器
+                kube-scheduler：调度器，负责调度未完成绑定的Pod
+                    调度：将Pod与某个Node建立绑定关系
+                celaster-controller：可用可无，部署在IAAS云上的时候，与底层上的云API交互的时候，借助底层的云来完成功能
+
+            Worker：执行组件
+                kubelete：负责Pod生命周期管理，任何Pod,把Pod运行的相关信息按周期发送给apiserver
+                    CRI：对接外部的容器运行时，比如cri-dockerd和docker-ce，containerd、cri-o
+                    CNI：对接外部的虚拟【容器】网络，比如：flannel【kubenet已经被抛弃了】、Calico、Cilium（eBPF）
+                        借助于 Underlay，Overlay 俩种类型来构建网络，依赖节点网络
+
+                    CSI：对接外部的存储服务，通常是共享存储服务，比如：nfs-driver【NFS】、Ceph
+                kube-proxy：Service功能在节点级的落地，具体来说，就是把Service的定义转换为节点上的iptables、ipvs规则
+                            负责将apiserver上的所有service功能转换该节点的为iptables/ipvs规则，
+                                       
+    Pod:编排运行应用的最小单元,动态性表现的淋漓尽致,体现在对应的 Pod 控制器上
+        容器集：一个到多个具有 "超亲密" 关系的容器的集合
+        超亲密：共享资源，比如：
+            名称空间: Network 【套接字的集合】,UTS[ 主机名和域名 ],IPC [ 进程间的通信 ]
+            Volume:  卷，可以在多个容器之间共享的
+        共享基础或者底层逻辑是,像名称空间,Volume等基础设施:叫做pause容器
+
+    资源池：
+        计算资源:   CPU,Memory
+        存储资源:   Volume
+        网络资源： 
+            Pod ---> Pod:		   东西向流量，集群间的通信，内部的进程或者组件之间的通信
+            集群外的进程 --> Pod:  南北向流量
+
+            Service:为工作负载提供固定的访问入口，
+                服务发现: label selector 标签选择
+                负载均衡: ipvs/iptables
+
+                Service名称：
+                    
+    核心工作逻辑：
+        声明式API：终态声明，期望状态（Spectification，简称spec）
+        控制器：   Controller，reconclilation loop，调谐循环
+            实际状态：Status
+                diff：Status --> Spec
+        应用编排控制器：
+            无状态应用：Deployment
+                podTemplate：Pod模板
+                    核心：要运行容器的列表
+                    标签
+                replicas：副本数，实例数
+                label selector：标签选择器
+            系统级应用：DaemonSet
+            有状态应用：StatefulSet
+            作业：
+                一次性作业：Job
+                周期性作业：CronJob
+        
+    编排运行一个应用的核心过程：
+        1、应用编排控制器资源对象
+        2、提供固定的访问入口，及负载均衡
+        3、提供应用配置对接到所属的Pod中去（其实这个配置：比如nginx的配置文件，用Volume挂载）
+
+# kuberletes高可用解决方案
+Mster高可用：
+    每个组件独立实现其自向的高可用机制
+        etcd：分布式高一致性kv存储，raft协议
+            奇数节点：3，5，7
+            etcd官方文档硬件推荐：https://etcd.io/docs/v3.5/op-guide/hardware
+        apiserver：无状态，2+
+            应该为其提供负载均衡器
+            https协议，而且客户端与apiserver需要直接建立tls会话，LB通常要做tcp级的负载均衡
+        controller-manager：选举出一个primary节点，余下的为Secondary
+            leader election:抢占式选举
+        scheduler：选举出一个primary节点，余下的为Secondary
+            leader election:抢占式选举
+
+    生产可用部署方式：
+        etcd：独立部署：5+节点
+            etcd：3个节点
+            master：2+节点集群
+        etcd与Master的组件部署在一起：堆叠式，3+节点集群
+            每个节点都不分etcd，master组件
+
+# 应用编排和运行基础
+编排运行一个应用的核心过程：
+    1、挑选一个合适应用编排控制器
+    2、对于一个服务端应用，通常应该一个Service，甚至基于Ingress资源提供7层http协议的反代及负载均衡
+    3、对于需要存储数据的应用【有状态】，还应该为其提供持久化存储数据的Volume
+    4、对于提供独特配置信息的应用，还应该为其提供 ConfigMap【提供配置文件】和Secret 【敏感数据，比如：证书或私钥】
+
+API Service提供的是编程接口，声明式API：前提是写代码，遵循资源API规范的配置文件【manifests：资源清单】
+    大多数资源，其API的格式近似，遵循同一个格式
+        五个一级字段:
+            apiVersion: 资源类型所属的群组及其版本号 
+            kind：资源类型本身的名称，例如：Pod，Service
+            metadata：对象元数据
+            Spec：期望状态，也叫终态声明
+            status：实际状态【k8s系统自动维护或控制器维护】
+
+            类型元数据：apiVersion， kind
+            对象元数据：metadata
+
+        API，为了方便管理，根据其所属的功能类别，API资源被分成了多个小组
+            每个组只包含一部分资源类型，这样组称为APIGroup，每个组独立进行版本标识
+            #查看组:kubectl api-versions
+                格式：GROUP_NAME/VERISON：群组/版本标识
+                    VERISON：可能多版本保存
+                        v1alpha1:
+                        v1: 分三个版本
+                            1、alpha:内测
+                            2、beta：公测，存在变动的可能
+                            3、stable：稳定
+            #查看所有的API资源组类型：kubectl api-resources
+                v1 = core/v1: 核心群组
+            #查看某个组下的资源类型或资源类型下的版本：kubectl api-resources --api-group=events.k8s.io[/v1]
+            #查看资源类型下的字段：kubectl explain pod
+                如果字段有【Object】表示有二级字段存在:kubectl explain pod.spec
+                    如果有【required】是必选字段,其他是可选字段：kubectl explain pod.spec.containers
+                        ...
+            #了解某资源类型API规范的命令：kubectl explain KIND
+
+API资源对象管理：
+    kubectl命令提供了三种类型的对象管理机制
+        1、指令式命令：
+            kubectl create deployment demoapp --image=ikubernrets/demoapp:v1.0 --replicas=3
+            kubectl get ns
+            kubectl get pods --namespace=kube-system
+            
+        2、指令式对象配置:从配置文件读取要操作对象，及对象属性，直接指明操作
+            kubectl create -f pod-demo.yaml
+                pod-demo.yaml:
+                    apiVersion、kind、metadata/spec
+
+            指令式命令常用【1，2】：增删改查
+                create、delete、edit【改:就地修改】、replace【替换：删了再创建】、get
+
+        3、声明式对象管理【有幂等性，支持重复执行】：从配置文件读取要操作对象，及对象属性；声明对象终态
+            基于配置文件执行对象管理操作
+            可直接运用目录下的所有配置清单文件，也可以直接作用于单个配置文件
+
+            声明式命令：apply，多用于修改类的目的
+                kubectl apply -f pod-demo.yaml
+                "应用"到集群上：
+
+        指令式命令：
+            仅打印资源清单：
+            kubectl create deployment demoapp --image=ikubertes/deoapp:v1.0 --port=80 --dry-run=client --replicas=3 -o yaml
+
+            创建deployment对象：
+            kubectl create deployment demoapp --image=ikubertes/deoapp:v1.0 --port=80  --replicas=3
+
+            了解完整的资源规范及状态：
+            kubectl get deployment [-o yaml | json]
+
+            了解Pod对象的相关信息：
+            kubectl get pods -l app=demoapp -o wide
+
+    Service的基础使用：
+        LB：
+            Service port 与Pod port 进行一一对应
+                --tcp=port[:targetPort]
+                --tcp=svc_port[:pod_port]
+                
+                kubectl create service clusterip demoapp --tcp=80:80 --dry-run=client -o yaml
+                
+                显示pod上的标签
+                    kubectl get pods --show-labels
+
+        资源详细状态信息的查看命令
+            kubectl describe RESOURCES NAME 
+                kubectl describe pods demoapp
+                kubectl describe service demoapp
+                kubectl describe deployment demoapp
+
+        查看 pod 运行在哪个后端端点
+                kubectl get endpoints demoapp -o wide
+
+        进入pod下容器的交互式接口
+            kubectl exec -it demoapp-55c5f88dcb-2fftc [-c] -- /bin/sh
+            curl demoapp.default.svc.cluster.local
+                demoapp.default.svc.cluster.local
+                service名称.名称空间的名字：跨名称空间访问
+                
+            能curl 成功是根service相关，如果没有比如是name的全称
+                 curl demoapp-55c5f88dcb-2fftc
+
+    创建Service时，会自动创建与其同名的Endpoint资源
+         kubectl get endpoints demoapp -o wide
+
+    Service的作用:服务发现，配置负载均衡器做负载均衡
+
+# 使用Pod运行应用
+    什么是Pod：
+        一个或者多个容器的集合，称为容器集，但却是Kubernetes调度、部署和运行应用的原子弹元
+        另外封装的内容：可被该组容器共享的存储资源、网络协议栈及容器的运行控制策略
+        依赖于 [pause] 容器事先创建出可被各应用容器共享的基础环境，默认共享 [Network、IPC、UTS] 名称空间给各容器，PID名称空间也可以共享，但需要用户显示定义
+    
+    Pod的组成形式有俩种
+        单容器Pod：仅含有单个容器
+        多容器Pod：含有多规格具有"超亲密"关系的容器的集合
+            同一个Pod内的所有容器都将运行于由Scheduler选定的同一个节点上
+            超亲密容器表现的应用展示如下以下：
+                Sidecar容器
+                Ambassador容器
+                Adapter容器
+                Init容器
+        注意：pause容器无需定义
+
+    Pod定义：Pod资源规范的基础框架
+        apiVersion:v1
+        kind:Pod                #第一字母必须大写
+        metadata:
+          name:pod-demo         #Pod的标识名，在名称空间中必须唯一
+          namespace:default     #该Pod所属的名称空间，省略时使用默认名称空间default；
+          labels:               #可选，标签
+            app:myapp
+            version:"v1.0"      #版本
+          annotations:          #可选，作者信息
+            wjs.com/author:"Wjs"
+        spec:
+          containers:           #定义容器，它是一个列表对象，可包括多个容器的定义，至少得有一个
+          - name:demo           #容器名称，必选字段，在当前Pod中必须唯一
+            image:ikubernetes/demoapp:v1.0         #创建容器时使用的镜像
+            imagePullPolicy:IfNotPresent/Always   #可选，镜像下载策略，【IfNotPresent：本地有不需要下载；Always:本地有没有都需要下载】
+          - name:               #可选，超亲密关系，不能定义在一起
+              ...
+            command:["/bin/sh"] #可选，容器运行的命令，接受args传过来的命令
+            args:["-c","sleep 99999"] #把参数传给上面的 command
+    
+    kubectl get pods -n kube-system:status字段的意思
+        status是Pod的相位，通常有以下几种:
+            Pending: 刚刚创建还没有调度的pod，表示：调度失败，无法绑定集群中的任何一个节点上，可能原因是：比如：cpu，内存不够用
+            running: 表示调度到集群中某个节点，并且运行起来了
+            Succeeded: 表示成功，比如作业：Job
+            Failed: 表示失败，比如作业：Job
+            unknwn: 无法获取pod状态或信息，
+                原因: kubelete向api-server每隔5s自动报告pod的信息或状态，如果没有向apiserver报告pod信息，就处于unknown状态
+        http://iwaibao.oa.com/
+        Pod生命周期有以下几个阶段
+            Pod声明周期有以下几个阶段
+                Pending: Pod已经被创建，但是一个或者多个容器还未创建，包括Pod调度阶段，以及容器镜像的下载过程
+                Running: Pod已经被调度到Node，所有容器已经创建，并且至少有一个容器在运行或者正在容器
+                Succeeded: Pod中所有所有容器正常退出
+                Failed: Pod中所有容器退出，至少有一个容器是一次退出的
+       
+       Pod拉取镜像的策略：
+        always:每次都下载最新的镜像
+        never：只使用本地镜像，从不下载
+        ifNotPresent：只有当本地没有的时候才下载镜像    
+            
+            容器的状态: 
+                Waiting；等待
+                running：正在运行 
+                Terminated：终止
+                初始化状态
+                ...自己查
+    
+    Pod的重启策略: 决定了容器终止后是否应该重启
+        Always: 无论何种exit code ，都要重启容器
+        OnFailure: 仅在exit code为非0值【即错误退出】时才重启容器
+        Never: 无论何种exit code,都不重启容器
+
+    标准的API资源规范：
+        资源存在俩个生效级别：
+            集群：Namespace,Node,PV...
+            名称空间：Pod、Service、Deployment、ConfigMap、Secret、Ingress、...
+            
+        标签过滤功能：
+            kubectl get pods -l app=demoapp --show-labels
+
+            等值过滤：
+                =：key=value,表示存在key，而且值为value
+                !=: key != value,表示存在key，其值不为value,或者不存在该key
+                例如：
+                    kubectl get pods -l 'app!=demoapp' --show-labels
+            
+            集合过滤：
+                存在列表中：
+                    'key in (value1,value2,...)'
+                    kubectl get pods -l 'app in (deoapp,myapp,testapp)' --show-labels
+                
+                不存在指定的列表中，或不存在改键：
+                    'key not in (value1,value2,...)'
+                    kubectl get pods -l 'app not in (deoapp,myapp,testapp)' --show-labels
+            
+                键的存在性判断：
+                    kubectl get pods -l 'app' --show-labels
+                    kubectl get pods -l '!app' --show-labels
+
+        annotations:对象注解，元数据，不能被标签过滤器使用，通常用于为应用提供配置
+            键值型数据：
+
+            管理命令：kubectl annotate   
+
+        spec:用户期望状态
+            查看:
+                kubectl explain TYPE.spec：列出spec所有的字段
+        
+        status:{}
+            资源的实际状态，即是指由kubernetes维护后的状态
+            工作逻辑：
+           
+                                                                                                                                                                                                       reconcliation loop:调谐循环
+                diff：Status和spec
+        
+    #配置Pod
+        通过环境变量向容器传递参数
+            
+        应用监控
+            容器式运行的应用类似于 "黑盒"，为了方便与平台对其进行检测，云原生应用应该输出用于监视自身API
+                1、包括健康状态、指标、分布式跟踪日志等
+                2、至少应该提供用于健康状态检测的API
+        
+        Pod的健康状态检测机制：
+            1、Pod支持的检测类型：探针
+                startup Probe:Pod 启动探针，探测服务状态是否启动成功
+                liveness Probe:存活探测，每隔2分钟探测一次，探测服务或者进程是不是可用，如果存活探测失败，然后根据Pod的重启策略来决定是否重启容器
+                readiness Probe:就绪探测，周期性检测资源，不会重启Pod，跟service有关，如果正常：就加入集群，不正常：移除集群
+            
+            2、每种探测类型支持的检测机制:
+                Exec Action:根据指定命令的结果状态码判定
+                TcpSocket Action:根据相应TCP套接字连接建立状态判定
+                HTTPGet Action:根据指定[https/http]服务URL的响应结果判定
+
+        配置参数：
+            initialDelaySeconds:首次检测的延迟时间
+            periodSeconds:首次隔多久探测一次【startup Probe】
+
+            timeoutSeconds:首次隔多久探测一次【其他的探针】
+            successThreshold:探测几次成功算是真的成功
+            failureThreshold:连续失败几次是真失败的次数
+
+        例如：
+            apiVersion: v1
+            kind: Pod
+            metadata:                                                                                                                                                                                                                     
+              name:liveness-exec-demo
+              namespace: default
+            labels:
+                test: liveness
+            spec:
+              containers:
+              - name: demo
+                image: demo
+                imagePullPolicy:IfNotPresent/always/never
+                startupProbe:                       #Pod启动多久就检测
+                  exec:
+                    command:['/bin/sh','-c','[ "$(curl -s 127.0.0.1/livez)" == "OK" ]']
+                  initialDelaySeconds:0             #Pod启动就检测 
+                  failureThreshold:3                #检测三次失败就真的失败
+                  periodSeconds:2                   #隔2秒检测一次
+                
+                livenessProbe:                      #存活探测，每隔2分钟探测一次，探测服务或者进程是不是可用，如果存活探测失败，kubernete会重启pod
+                  httpGet：
+                    path:'/livez'
+                    port:80
+                    scheme:HTTP
+                  initialDelaySeconds:3             #首次检测的延迟时间
+                  timeoutSeconds:1                  #首次隔1秒探测一次
+                  periodSeconds:5                   #隔5秒检测一次
+                
+                readinessProbe:                     #就绪探测，周期性检测资源，不会重启Pod，跟service有关，如果正常：就加入集群，不正常：移除集群
+                  httpGet:                          #http协议检测，状态码
+                    path:'/readyz'                  #状态
+                    port:80                         #检测的端口
+                    scheme:HTTP                     
+                  initialDelaySeconds:15            #首次隔15秒检测一次
+                  timeoutSeconds:2                  #首次隔2秒检测一次
+                  periodSeconds:5                   #每隔5s检测一次
+                  failureThreshold:3                #检测三次失败就真的失败
+              restartPolicy:Always                  #检测失败就一直重启
+
+                
+
+            
+    # 安全上下文和资源需求
+        Pod及容器的安全上下文:
+            一组用来决定容器是如何创建和运行的约束条件，这些条件代表创建和运行容器时使用的运行时参数
+            给了用户为Pod或容器定义特权和访问控制机制
+
+            Pod和容器的安全上下文设置主要包括以下几个方面
+                1、自主访问控制DAC
+                2、容器进程运行身份及资源访问权限
+                3、Linux Capabilities：内核的功能
+                4、seccomp
+                5、AppArmor
+                6、SELinux
+                7、Privilege Mode:基于内核的特权
+                8、Privilege Escalation
+
+            以普通用户运行容器的相关配置：
+                apiVersion: v1
+                kind: Pod
+                metadata:
+                name:liveness-exec-demo
+                namespace: default
+                labels:
+                    test: liveness
+                spec:
+                containers:
+                - name: demo
+                    image: demo
+                    imagePullPolicy:IfNotPresent/always/never
+                    env:
+                    - name:ROOT 
+                      value:"8080"
+                    securityContext:        #设在在容器里面：意思就容器以普通用户运行，如果设置在pod里面：整个pod下的容器都是以普通用户运行
+                      runAsuser:1001
+                      runAsgroup:1001
+        
+        # 资源需求和资源限制:
+            资源需求(requests)---下限:
+                1、定义需要系统预留给该容器使用的资源最小可用值
+                2、容器运行时可能用不到这些额度的资源，但用到时必须确保有相应数量的资源可用
+                3、资源需求的定义会影响调度器的决策
+            资源限制(limits)---上限:
+                1、定义该容器可以申请使用的资源最大可用值，超出该额度的资源使用请求将被拒绝
+                2、该限制需要最大等于requests的值，但系统在其某项资源紧张时，会从容器那里回收其使用的超出其requests值的那部分
+
+            requests和limits定义在容器级别，主要围绕【cpu,memory,hugepages】三种资源
+
+            requests和limits相关的配置：
+                apiVersion: v1
+                kind: Pod
+                metadata:
+                name:stress
+                namespace: default
+                labels:
+                    test: stress
+                spec:
+                containers:
+                - name: stress
+                    image: ikubernetes/stress
+                    imagePullPolicy:IfNotPresent/always/never
+                    command:["/usr/bin/stress-ng","-c 1","--metrics-brief"]
+                    resources:
+                      requests:         # 资源请求---下限
+                        memory:"128MI"
+                        cpu:"200m"
+                      limits:           # 资源限制---上限
+                        memory:"512Mi"
+                        cpu:"400m"
+    
+        # 总结Pod配置应用
+            1、环境变量env：传递配置参数，给容器
+            2、健康状态检测：
+                类型:startupProbe：判定应用是否启动成功
+                    livenessProbe:应用运行周期性检测【主要检测进程】
+                        如果失败了：导致Pod重启（restartPolicy）
+                    readinessProbe:整个应用运行期间进行探测【主要:探测进程有没有对外提供服务】
+                        如果失败了：导致相关的Service判定是否可用的后端端点
+
+            3、资源需求和资源限制
+                requests:资源下线，最低保障
+                limits:资源上限【容器或Pod】
+
+            4、安全上下文
+                定义容器运行的约束条件
+                    改变进程的运行身份，默认以容器内的受限的root身份
+                        CAP_CHOWN，...
+
+                容器可用的CAPABILITIES
+                    CAP_NET_ADMIN：网络管理员
+                    CAP_NET_BIND_SERVICE:
+
+    #Pod设计模式
+        单节点多容器模式的常见实现
+            1、Sidecar模式:
+                补充容器的功能，比如反代或负载
+                Pod中的应用由主应用程序(通常是基于HTTP协议的应用程序)以及一个Sidecar容器组成
+                辅助容器用于【比如：nginx】为主容器提供辅助服务器以增强主容器的功能
+                
+            2、Ambassador模式:
+                系统主动请求对接外部系统去 
+                Pod中的应用由主应用程序和一个Ambassador容器组成
+                辅助容器代表主容器发送网络请求至外部环境中，因此称为"大使"
+                应用场景:云原生应用程序需要诸如断路、路由、计算和监视等功能，但更新已有的应用程序代码库以添加这些功能可能很困难，甚至难以实现，进程外代理便成了一种有效的解决方案
+
+            3、Adapter模式:适配模式
+                系统本身集成到web环境中去
+                Pod中的应用由主应用程序和一个Adapter容器组成
+                Adapter容器为主应用程序提供一致的接口，实现了模块重用，支持标准化和规范化主容器应用程序的输出以便于外部服务进行聚合
+
+            4、Init Container模式:初始化容器模式
+                为应用提供初始化阶段，与前面模式不一样的是，Init是串行运行，，每个容器运行结束要退出，所有初始化容器成功运行后退出，才允许mian Container容器
+                Pod中的应用由主应用程序和一个Init容器组成
+                init容器必须先比主应用程序容器之前运行，完成必要的初始化任务，包括文件系统上的必要的特殊权限、数据库模式设置或为主应用程序提供初始数据等，但这些初始化逻辑无法包含在应用程序的镜像文件中，或者出于安全原因，应用程序镜像没有执行初始化活动的权限等等
+                Init容器需要串行运行，且在所有Init容器均正常终止后，才能运行主容器
+                #相关配置:
+                    apiVersion:v1  
+                    kind:Pod
+                    metadata:
+                      name:init-container-demo
+                      namespace:default
+                    spec:
+                      initContainers:
+                      - name:iptables-init
+                        image:ikubernetes/admin-box:v1.2
+                        imagePullPolicy:IfNotPresent
+                        command:['/bin/sh','-c']
+                        args:['iptables -t nat -A PREROUTING -p tcp --dport 8080 -j REDIRECT --yo-port 80']
+                        securityContext:   #给该容器运行应用程序设置权限
+                          capabilities:    #内核给权限
+                            add:    
+                            - NET_ADMIN     #管理员权限,操作内核的能力
+                      containers:
+                      - name:proxy          
+                        iamge:nginx:1.22.0-alpine       # Sidecar模式配置
+                      - name:demo
+                        image:ikubernetes/demoapp:v1.0
+                        imagePullPolicy:IfNotPresent
+                        env:
+                        - name:HOST
+                          value:127.0.0.1
+                        - name:PORT
+                          value:80
+
+
+
+
+            5、lifecycle hook:生命周期钩子
+                俩种类型:
+                    1、postStart:启动后的操作
+                    2、preStop:结束前操作，比如:清理缓存
+
+        #相关配置:
+                    apiVersion:v1  
+                    kind:Pod
+                    metadata:
+                      name:init-container-demo
+                      namespace:default
+                    spec:
+                      initContainers:                       #init模式
+                      - name:iptables-init
+                        image:ikubernetes/admin-box:v1.2
+                        imagePullPolicy:IfNotPresent
+                        command:['/bin/sh','-c']
+                        args:['iptables -t nat -A PREROUTING -p tcp --dport 8080 -j REDIRECT --yo-port 80']
+                        securityContext:   #给该容器运行应用程序设置权限
+                          capabilities:    #内核给权限
+                            add:    
+                            - NET_ADMIN     #管理员权限,操作内核的能力
+                      containers:
+                      - name:proxy          
+                        iamge:nginx:1.22.0-alpine       # Sidecar模式配置
+                      - name:demo
+                        image:ikubernetes/demoapp:v1.0
+                        imagePullPolicy:IfNotPresent
+                        env:                            #环境变量，修改监听的地址
+                        - name:HOST
+                          value:127.0.0.1
+                        - name:PORT
+                          value:80      
+
+    # Pod 存储卷和持久卷--Pod级别定义的卷
+        弊端：卷的生命周期无法独立于Pod而存在
+                
+        存储卷插件
+            1、临时卷:Pod对象启动就创建，Pod对象被移除一并删除
+                emptyDir
+                    通常用于某些特殊场景：
+                        1、同一个pod内的多个容器文件共享
+                        2、作为容器数据的临时存储目录用于数据缓存系统
+                    配置参数有俩个:
+                        1、medium:此目录所在的存储介质的类型，可用值为"default和Memory,不指定Memory，默认是磁盘"
+                        2、sizeLimit:当前存储卷的空间限额，默认值为nil，表示不限制
+                    # enmptyDir 卷示例YAML: 一个卷供俩个容器使用
+                        apiVersion:v1
+                        kind:Pod
+                        metadata:
+                          name:volumes-emptydir-demo
+                        spec:
+                          initContainers:
+                          - name:config-file-downloader
+                            image:ikubernetes/admin-box
+                            imagePullPolicy:IfNotPresent
+                            command:['/bin/sh','-c','wget -O /data/envoy.yaml https://code.aliyun.com/MageEdu/kubernetes-start/raw/master/turorials/handson/volume-basics-01/envoy.yaml']
+                            volumeMounts:
+                            - name:config-file-store
+                              mountPath:/data                   #挂载点
+                          containers:
+                          - name:envoy
+                            image:envoyproxy/envoy-alpine:v1.16.2
+                            command:['/bin/sh','-c']
+                            args:['envoy -c /etc/envoy.yaml']
+                            volumeMounts:
+                            - name:config-file-store
+                              mountPath:/etc/envoy
+                              readOnly:true
+                            volumes:
+                        -------------------------------
+                            - name:config-file-store
+                              emptyDir
+                                medium:Memory
+                                sizeLimit:16Mi
+                        -------------------------------
+                            - name:redisdata
+                              hostPath:
+                                path:/appdatas/redis/
+                                type:DirectoryOrCreate
+
+            2、节点本地存储卷
+                hostPath,local
+                    将Pod所在节点上的文件系统的某目录用作存储卷
+                    数据的生命周期与节点相同
+                配置参数：
+                    path：指定工作节点上的目录路径，必选字段：宿主机的目录
+                    type：指定节点之上存储类型，是目录，接口还是文件
+                        Directory:前提是目录得先存在，已经创建好了的
+                        DirectoryOrCreate:目录不存在就创建
+                        file:前提是文件得先存在，已经创建好了的
+                        FileOrCreate:文件不存在就创建
+                # hostPath 卷示例YAML:
+                    apiVersion: v1
+                    kind: Pod
+                    metadata:
+                      name: redis
+                      labels:
+                        app: redis
+                    spec:
+                      containers:
+                      - name:redis
+                        image:redis:alpine
+                        ports:
+                        - containerPort:6379
+                          name:redisport
+                        securityContext
+                          runAsUser:999                     # 注意映射到宿主机目录的权限问题
+                        volumeMounts: 
+                        - mountPath: /data
+                          name:redisdata
+                    =============================================== hostPath ================================================================
+                      volumes:
+                        - name:redisdata
+                          hostPath:
+                            path:/appdatas/redis/           # 这个是宿主机目录，node节点上可用看到
+                            type:DirectoryOrCreate     
+                    =============================================== NFS ===============================================================
+                      volumes:
+                        - name:redisdata
+                          nfs:
+                            server: nfs.wjs.com/10.0.0.109               # NFS服务器的IP地址或者主机名，必选字段
+                            path: /appdatas/redis/                       # NFS导出【共享】文件系统的路径，必选字段，也就是nfs服务器共享的文件目录
+                            readOnly: false                              #是否以只读的方式挂载，默认是false
+                    
+                    # 注意：
+                        NFS客户端所有node的节点都需要安装，因为不知道会调度到哪里去,nfs-common
+                        nfs挂载的目录是普通用户 999 
+
+            3、网络存储卷
+                -文件系统:NFS,GlusterFS【1.24抛弃了】,CephFS和Cinder
+                -块设备:ISCSI,FC,RBD和vSphereVolume
+                -存储平台:Quoyte,ProtworxVolume,StorageOS和ScaleIO
+                -云存储：awsElasticBlockStore,gcePersistentDisk，azureDisk和azureFile
+            4、特殊存储卷
+                Secret、ConfigMap,DownwardAPI和Projected
+            5、扩展接口
+                CSI和FlexVolume
+
+        定义存储卷
+            存储卷对象需要定义在Pod上
+            存储卷的配置俩部分组成：
+                1、在pod级别上定义卷，对接外部的存储服务
+                2、容器上挂载该卷
+            
+            相关配置yaml；
+                spec:
+                volume:
+                - name:卷名称标识，仅可使用DNS标签格式的字符，在当前Pod中必须唯一
+                VOL_TYPE<Object>[比如:enmptyDir]: #存储卷插件及具体的目标存储供给方的相关配置
+                containers:
+                - name:
+                    image:
+                    volumeMounts:
+                    - name:要挂载的存储卷的名称，蓄婢匹配存储卷列表中某项的定义
+                    mountPath:容器文件系统上的挂载点路径
+                    readOnly<boolean>:是否挂载为只读模式，默认为否
+                    subPath:挂载存储卷上的一个子目录至指定挂载点
+                    subPathExpor:挂载由指定的模式匹配到存储卷的文件或目录至挂载点，可以使用正则表达式
+                volumes:
+                - name:config-file-store 
+                  enmptyDir:
+                    medium:Memory           #存在内存中，默认在磁盘上
+                    sizeLimit:16Mi          #最多多少空间
+
+# PV和PVC
+    PV:是集群级别的资源，负责将存储空间引入到集群中，通常由管理员定义
+        PV资源:
+            1、Volume Mode:当前PV卷提供的存储空间模型，分为块设备和文件系统俩种
+            2、StorageClassName:当前PV隶属的存储类
+            3、accessModes:支持的访问模型，分为单路读写、多路读写和多路只读俩种
+            4、Size:当前PV允许使用的空间上限
+            在对象元数据上，还能够根据需要定义标签
+            5、一般需要定义回收策略：
+                Retain：不删除，保留
+                Delete：直接删除
+                Recycle:回收不删，数据清空，被废弃了
+                回收策略：PVC和PV建立了绑定关系，如果把PVC删了，PV删不删，这就是回收策略
+        
+        基于NFS的静态PV和PVC示例:
+            apiVersion:v1
+            kind:PersistentVolume
+            metadata:
+              name:pv-nfs-demo
+            spec:
+              capacity:         #声明存储空间的大小是多大
+                storage:5Gi                         #大小5G
+              volumeMode:Filesystem                 #存储系统接口类型：文件系统
+              accessModess:                          #支持多路读写   (RWX:中X---多路，O---表示单路，RWO) 
+                - ReadWriteMany
+              persistentVolumeReclaimPolicy:Retain   #回收策略是：不删除，保留
+              mountOptions:                          #挂载选项
+                - hard 
+                - nfsvers=4.1
+              nfs:
+                path:"/data/redis"
+                server:10.0.0.109
+    
+    
+    PVC:是名称空间级别的资源由用户定义，用于在空闲的PV中申请使用符合过滤条件的PV之一，与选定的PV的"一对一"的关系
+        用户在Pod上通过pvc插件请求绑定使用定义好的PVC资源
+        
+        PVC资源:    
+            1、PVC也是标准的资源类型，允许用户按需指定期望的存储特性，并以之为条件，按特定的条件顺序进行PV过滤
+                VolumeMode --> LabelSelector --> StorageClass --> accessModes --> size
+            
+            2、支持动态预配的存储类，还可以根据PVC的条件按需完成PV的创建
+
+        用户定义PVC示例：
+            apiVersion:v1
+            kind:PersistentVolumeClaim 
+            metadata:
+              name:pvc-demo-001 
+              namespace:default
+            spec:
+              accessModes:["ReadWriteMany"]   #过滤多路读写的PV
+              volumeMode:Filesystem           #存储类型是文件系统
+              resources:
+                requests:
+                  storage:3Gi
+                limits:
+                  storage:10Gi 
+
+        在Pod上使用PVC卷：
+            apiVersion: v1
+            kind: Pod
+            metadata:
+            name: volume-pvc-demo
+            namespace: default
+            spec:
+            containers:
+            - name: redis
+                image: redis:alpine
+                imagePullPolicy: IfNotPresent
+                ports:
+                - containerPort: 6379
+                name: redisport
+                volumeMounts:
+                - mountPath: /data
+                name: redis-nfs-vol
+            volumes:
+            - name: redis-nfs-vol
+                persistentVolumeClaim:
+                claimName: pvc-demo-001
+
+        总结PV和PVC:
+            PV：某个存储服务（独立存储接口，可以是个块设备，也可以是个文件系统）的抽象，对应于一种k8s标准资源类型配置参数，对接到某个后端存储服务上
+            PVC:PV的过滤器，指定一到多个过滤条件，从而从所可用的PV中请求绑定一个PV
+            POD:使用persistenVolumeClaim卷插件，请求对接到PVC上
+                Pod --> PVC[persistemVolumeClaim] --> PV --> PV[集群级别的资源]
+
+# StorageClass
+    1、k8s支持的标准资源类型
+    2、为管理PV资源之便而按需创建的存储资源类别（逻辑组）
+    3、是PVC筛选PV时的过滤条件之一
+    4、为动态创建PV提供"模板"
+        需要存储服务提供管理的API
+        StorageClass资源上配置接入API的各种参数
+            定义在parammeters字段中
+            还需要使用provisioner字段指明存储服务的类型
+    5、一般由集群管理定义，隶属集群级别
+    
+    StorageClass资源示例:
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: nfs-csi 
+        provisioner: nfs.csi.k8s.io         #对接后端的存储服务的类型
+        parameters:
+          server:10.0.0.109                 #对接后端的存储服务地址
+          share:/                           #哪个目录支持动态创建的
+        reclaimPolicy: Delete 
+        volumeBindingMode: Immediate        #如果有申请，立马创建PV
+        mountOptions:
+          - hard
+          -nfsvers=4.1
+        
+    StorageClass的作用：
+        是PVC筛选PV时的过滤条件之一
+        为动态创建PV提供"模板"
+
+    # 总结：PVC过滤PV的办法:
+        1、VolumeMode:Filesystem、BlockDevice
+        2、labelSecltor:过滤符合标签选择器条件的PV
+            PV:实时定义了标签
+        3、storageClassName:pvc和pv可以隶属某个sc，也不属于任何sc
+            pvc只能够在同一个storgeClass中过滤pv
+                能建立绑定关系的pvc和pv一定满足如下条件:
+                    二者隶属于同个sc
+                    二者都不属于任何sc
+        4、accessModes：
+            RWX:中X---多路，O---表示单路，RWO
+
+            RWX - ReadWriteMany:多路读写，卷可以被多个节点以读写方式挂载。
+            ROX - ReadOnlyMany:多路只读，卷可以被多个节点以只读方式挂载。
+            RWO - ReadWriteOnce：单路读写，卷可以被一个节点以读写方式挂载。 ReadWriteOnce 访问模式也允许运行在同一节点上的多个 Pod 访问卷   
+            RWOP - ReadWriteOncePod:卷可以被单个 Pod 以读写方式挂载。 如果你想确保整个集群中只有一个 Pod 可以读取或写入该 PVC， 请使用 ReadWriteOncePod 访问模式。这只支持 CSI 卷以及需要 Kubernetes 1.22 以上版本
+
+        5、Size:需要的空间大小进行筛选
+
+    动态预置:
+        
+# k8s存储架构及CSI介绍
+    k8s存储架构
+        存储卷的具体的管理操作由相关的控制器向卷插件发起调用请求完成
+            1、AD控制器：负责存户设备的Attach/Detach操作
+                Attach:将设备附加到目标节点
+                Detach:将设备从目标节点上拆除
+            2、存储卷管理器：负责完成卷的Mount/Umount操作，以及设备的格式化操作等
+            3、PV控制器负责PV/PVC的绑定、生命周期管理，以及存储卷的Provision【预置】/Delete操作
+        
+        Scheduler:特定调度插件的调度决策会受到目标节点上的存储卷的影响
+
+    CSI介绍
+        1、容器存储接口规范，与平台无关
+        2、驱动程序组件
+            CSI Controller：负责与存储服务的API通信从而完成后端存储的管理操作
+            Node Plugin：也称为CSI Node，负责在节点界别完成存储卷的管理
+
+        CSI Controller：由StatefulSet控制器对象编排运行，副本量需要设置为1，以保证只会i该存储服务运行单个CSI Controller实例
+
+        Node Plugin：由DaemonSet控制器对象编排运行，以确保每个节点上精确运行一个线管的Pod副本
+        
+# ConfigMap和Secert资源--特殊的存储卷-卷插件
+    ConfigMap和Secret是k8s系统上俩种特殊类型的存储类
+        1、ConfigMap由于为容器中的应用提供配置数据以定制程序的行为，而敏感端点配置信息，例如密钥、证书等通常由Secret来配置
+        2、ConfigMap和Secret将相应的配置信息保存于资源对象中，而后在Pod对象上支持以存储卷的形式将其挂载并加载相关的哦欸之，从而降低了配置与镜像文件的耦合关系，提高了镜像的复用能力
+        3、k8s借助于ConfigMap对象实现了将配置文件从容器镜像中解耦，从而增强了工作负载的可移植性，时期配置更易于更改和管理，并避免了将配置数据硬编码到Pod配置清单中
+    ConfigMap和Secret都属于名称空间级别，只能被同一名称空间中的Pod引用
+
+    ConfigMap和Secret资源都是数据承载的组件，是k8s API的标准资源类型，是一等公民
+        1、主要负责提高key-value格式的数据项，其值支持
+            单行字符串：常用于保存环境变量值，或者命令行参数等
+            多行字串：常用于保存配置文件的内容
+            例如：
+                apiVersion: v1
+                kind:ConfigMap 
+                metadata:
+                  name:myapp-confs 
+                data:
+                  port: "8080"
+                  myserver-status.cfg: |        #myserver-status.cfg: 文件名，后面是文件内容
+                    location /nginx-status {
+                        stub_status on;
+                        access_log off;
+                        ...
+                    }
+        2、资源规范中不使用spec字段，而是直接使用特定的字段嵌套定义key-value 数据 
+            1、ConfigMap 支持使用data或binaryData字段嵌套一至多个键值数据项
+                binaryData：ftp，二进制编码
+            2、Secret 支持使用data或stringData(非base64编码的明文格式)字段嵌套一至多个键值数据项，解码是secret
+            
+        3、从k8s v1.19版本开始，ConfigMap和Secret支持使用immutable字段创建不可变实例
+            不可变实例：ConfigMap创建好了是不能变动，如果要变，还是得先删除再创建
+
+        创建ConfigMap对象:
+            1、命令式命令：
+                字面量:     kubectl create configmap NAME --from-literal=kev1=value1 
+                从文件加载: kubectl create configmap NAME --from-file=[key=]/path/to/file   #key可有可无，用文件名当key
+                从目录加载：kubectl create configmap NAME --from-file=/path/to/DIR
+                   
+            2、配置文件
+                命令式: kubectl create -f
+                声明式: kubectl apply -f 
+            
+            提示: 基于文件内容生产时，可以使用命令时命令以dry-run模式生成并保存
+
+        资源案例:
+            命令式命令
+                kubectl create configmap nginx-confs --from-file=./nginx-conf.d/myserver.conf --from-file=status.cfg=./nginx-conf.d/myserver-status.cfg
+            配置文件
+                1、先准备好配置文件
+                2、创建configmap：kubectl create configmap nginx-conf --from-file=./nginx --dry-run=client -o nginx-conf-configmap.yaml
+
+    引用ConfigMap对象
+        ConfigMap资源对象中以key-value保存的数据，在Pod中引用的方式通常有俩种
+            1、环境变量 
+                引用ConfigMap对象上特定的key，以valueFrom赋值给Pod上指定的环境变量
+                在Pod上使用envFrom一次性导入ConfigMap对象上的所有key-value，key(也可以统一附加特定前缀)即为环境环境变量名，value自动成为相应的变量值
+            
+            2、ConfigMap卷 
+                在Pod上将ConfigMap对象引用为存储卷，而后整体由容器mount至某个目录下
+                    key转为文件名，value即为相应的文件内容
+                在Pod上定义configmap卷时，仅引用其中的部分key，而后由容器至目录下
+                在容器上仅mount configmap卷上指定的key
+        
+        在Pod上配置使用ConfigMap
+            存储卷的引用:
+                pod引用configmap
+                [root@master01 configmap-secret]#cat configmaps-volume-demo.yaml 
+                    apiVersion: v1
+                    kind: Pod
+                    metadata:
+                      name: configmaps-volume-demo
+                      namespace: default
+                    spec:
+                    containers:
+                    - image: nginx:1.22-alpine
+                        name: nginx-server
+                        volumeMounts:
+                        - name: ngxconfs
+                        mountPath: /etc/nginx/conf.d/
+                        readOnly: true
+                    volumes:
+                    - name: ngxconfs
+                        configMap:
+                          name: configmap-nginx-conf
+                          optional: false
+                
+                configmap的配置文件，基于模板生成，看【资源案例】
+                [root@master01 configmap-secret]#cat configmap-nginx.conf.yaml 
+                    apiVersion: v1
+                    data:
+                    nginx-gzip.cfg: |
+                        gzip on;
+                        gzip_comp_level 5;
+                        gzip_proxied     expired no-cache no-store private auth;
+                        gzip_types text/plain text/css application/xml text/javascript;
+                    nginx-status.cfg: |
+                        location /nginx-status {
+                            stub_status on;
+                            access_log off;
+                        }
+                    nginx.conf: |
+                        server {
+                            listen 80;
+                            server_name www.wujiashun.xyz;
+                            server_tokens off;
+                            include /etc/nginx/conf.d/*.cfg;
+                            index index.php index.html index.htm;
+                            error_page   500 502 503 504 /50x.html;
+                            location / {
+                                root /usr/share/nginx/html;
+                            }
+                        }
+                    kind: ConfigMap
+                    metadata:
+                      name: configmap-nginx-conf
+
+            基于环境变量的使用：
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: demoapp-config-for-envfrom
+                  namespace: default
+                data:
+                  PORT: "8090"
+                  HOST: 0.0.0.0
+                ---
+                apiVersion: v1
+                kind: Pod
+                metadata:
+                  name: configmaps-envfrom-demo
+                  namespace: default
+                spec:
+                  containers:
+                  - image: ikubernetes/demoapp:v1.0
+                      name: demoapp
+                      envFrom:
+                      - configMapRef:
+                          name: demoapp-config-for-envfrom
+                          optional: false
+
+    Secret资源:
+         1、Secret主要用于存储密钥、OAuth令牌和shh密钥等敏感信息，这些敏感信息采集采用base64编码保存
+         2、Secert过呢据其用途，还有类型上的区分
+            Bultin type ：类型标识符
+            Usage：类型常用的场景
+                                              Bultin type                               Usage：
+                # 用generic定义                  Opaque                                    arbitrary user-defined data    #没有指定类型，默认类型          
+                # 用generic定义 --type选项指定    kubernetes.io/service-account-token       service account token                     
+                # 用docker-registry定义           kubernetes.io/dockercfg                  serialized ~/.dockerfile file            
+                # 用docker-registry 定义          kubernetes.io/dockerconfigjson           serialized ~/.docker/config.json file
+                # 用generic定义 --type选项指定    kubernetes.io/basic-auth                  credentials for basic authentication   # http协议的认证：提供账号密码的认证，不能用命令行指定
+                # 用generic定义 --type选项指定    kubernetes.io/ssh-auth                    credentials for SSH authentication     
+                # 用tls定义                       kubernetes.io/tls                         data for a TLS client or server       # 为服务端或客户端提供证书和私钥，实现通信双方建立tls会话，
+                                                                                                                                    为其中一个所依赖的数字证书和私钥，创建 
+                # 用generic定义 --type选项指定    bootstrap.kubernetes.io/token              bootstrap token data                  # k8s初次化集群的时候，节点加入集群中实现的
+
+            注意：不同类型的Secret，在定义时支持使用的标准字段也有所不同
+                 例如；ssh-auth类型的Secert应该使用ssh-privatekey,而basi-auth 类型的Secret则需要使用username和password等
+            提示：另外也可能存在一些特殊的用于支撑第三方需求的类型，例如cep的keyring信息，使用的kubernetes.io/rbd等
+
+        创建Secret资源:
+            1、支持类似于ConfigMap的创建方式，但Secret有类型子命令，而且不同类型在data或stringData字段中支持嵌套使用的key亦会有所不同
+            2、命令式命令:
+                generic:常用所有无法确定的类型用
+                    1、kubectl create secret generic NAME [--type=string] [--from-file=[key=]source] [--from-literal=key1=value]
+                    2、除了后面docker-registry和tls命令之外的其它类型，都可以使用该命令中的--type选项进行定义，但有些类型key的特定要求
+
+                tls：
+                    1、kubectl create secret tls NAME --cert=path/to/cert/file --key=path/to/file
+                    2、通常，其保持cert文件内容的key为tls.crt ,而保存private key 的key为tls.key
+                
+                docker-registry:
+                    1、kubectl create secret docker-registry NAME --docker-username=user --docker-password --docker-email=email [--docker-server=string] [--from-file=[key=]souce]
+                    2、通常，从已有的json格式的文件加载生成的就是dockercnfigjson类型，命令行直接量生成的也是该类型
+
+    Secert的资源案例：
+        1、命令式命令：
+            kubectl create secret generic mysql-root-pass --from-literal=username=wjs --from-literal=password=123456 --dry-run=client -o yaml > secret-test.yaml
+        
+        2、配置文件：
+            apiVersion: v1
+            data:
+              password: MTIzNDU2
+              username: d2pz
+            kind: Secret
+            metadata:
+              name: mysql-root-pass
+        ---------------------------------------------------------------
+                base64编码：
+                    echo '123456' | base64
+                base64解码：
+                    echo "d2pz" | base64 -d 
+        --------------------------------------------------------------
+
+
+        3、tls:
+            查看帮助:kubectl create secret tls --help
+            命令式命令：
+                    kubectl create secret tls nginx-tls --cert=./certs.d/nginx.crt --key=./certs.d/nginx.key --dry-run=client -o yaml
+            配制文件：
+                apiVersion: v1
+                data:
+                  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURsVENDQW4yZ0F3SUJBZ0lVR2Zya05FeGZiS2N5Yy9LYkpLUXJ5MzR      #crt文件编码过一次，secret再编码一次
+                  tls.key: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFb2dJQkFBS0NBUUVBekl1ZnRrUG1EVXFzdjZGRnpBdFBveUk
+                metadata:
+                  creationTimestamp: null
+                  name: nginx-tls
+                type: kubernetes.io/tls
+
+    引用Secret对象
+        Secret资源在Pod中引用的方式同样俩种
+            1、环境变量[不建议用环境变量]
+                引用Secret对象上特定的key，以valueFrom赋值给Pod上指定的环境变量
+                在Pod上使用envFrom一次性导入Secret对象上的所有key-value,key(也可以统一附加特定前缀)即为环境环境变量名，value自动成为相应的变量值
+            2、secret卷
+                在Pod上将Secret对象为存储卷，而后整体由容器mount至某个目录下
+                    key转为文件名，value即为相应的文件内容
+                在Pod上定义Secret卷时，仅引用其中的部分key，而后由容器mount至目录下
+                在容器上仅mount Secret卷上指定的key
+            注意：容器很可能会将环境变量打印到日志中，因而不建议以环境变量的方式引用Secret中的数据
+
+            3、ConfigMap和Secret混合示例:
+                创建secret-tls示例:注意卷的名称，Pod需要对其引用
+                    kubectl create secret tls nginx-tls --cert=./certs.d/nginx.crt --key=./certs.d/nginx.key --dry-run=client -o yaml
+
+                创建Configmap示例:注意卷的名称，Pod需要对其引用
+                    kubectl create configmap nginx-confmap-tls --from-file=./nginx-tls/ --dry-run=client -o yaml
+                    
+                    apiVersion: v1
+                    data:
+                      nginx-gzip.cfg: |
+                            gzip on;
+                            gzip_comp_level 5;
+                            gzip_proxied     expired no-cache no-store private auth;
+                            gzip_types text/plain text/css application/xml text/javascript;
+                      nginx-status.cfg: |
+                            location /nginx-status {
+                                stub_status on;
+                                access_log off;
+                            }
+                      nginx-tls.conf: "server {\n\tlisten 443 ssl;\n\tserver_name www.wjs.xyz;\n\troot
+                            /usr/share/nginx/html;\n\tssl_certificate /etc/nginx/certs/tls.crt;\n\tssl_certificate_key
+                            \ /etc/nginx/certs/tls.key;\n\tssl_session_timeout 5m;\n\tssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE:ECDH:AES:HIGH:!NULL:!aNULL:!MD5:!ADH:!RC4;\n\tssl_protocols
+                            TLSv1.1 TLSv1.2 TLSv1.3;\n\tssl_prefer_server_ciphers on;\n    include /etc/nginx/conf.d/*.cfg;\n\tindex
+                            index.php index.html index.htm;\n\terror_page   500 502 503 504 /50x.html;\n}\nserver
+                            {\n    listen 80;\n    server_name www.wjs.xyz;\n    return 301 https://$host$request_uri;\n}\n"
+                    kind: ConfigMap
+                    metadata:
+                      name: nginx-confmap-tls
+
+                创建Pod挂载该Configmap和Secret卷
+                    apiVersion: v1
+                    kind: Pod
+                    metadata:
+                      name: secret-confmap-volume
+                      namespace: default
+                    spec:
+                      containers:
+                      - image: nginx:1.22-alpine
+                        name: ngxserver
+                          imagePullPolicy: IfNotPresent
+                          volumeMounts:
+                          - name: ngxtls
+                              mountPath: /etc/nginx/certs/ 
+                              readOnly: true
+                          - name: ngxconfs
+                              mountPath: /etc/nginx/conf.d/
+                              readOnly: true
+                    volumes:
+                    - name: ngxtls
+                        secret:
+                        secretName: nginx-tls
+                    - name: ngxconfs
+                        configMap: 
+                        name: nginx-confmap-tls
+                        optional: false
+
+    # docker类型
+
+# Service工作原理
+    Service作用：需要连同每个节点的上所运行的kube-porxy，该kube-proxy组件负责监视着apiserver上所有service资源的变动，并将其service资源当中以及与之关联的endpoint资源当中所映射
+    出来的所有信息，创建并定义成所在节点的iptables或者ipvs规则
+        如何确认是iptables或ipvs规则，取决于kube-proxy工作模型的指定[iptables/ipvs]
+            mode: iptables/ipvs     默认是iptables
+    
+    kube-proxy: kube-proxy进程，负责从kube-apiserver读取出来service，对每一个service，每一个kube-proxy，都要生成该节点上的iptables/ipvs规则，
+                所以【对某一个特定的服务】每一个节点上都有相应的规则，每一个节点都是该服务的负载均衡器
+                简单来说就是: 负责将apiserver上的所有service功能转换该节点的为iptables/ipvs规则，到底是iptables、ipvs规则取决于service模式
+    
+    Service如何做负载均衡：
+        负载均衡器在客户端的一侧，用service配置标签选择器，做自动发现后端有几个实例，再通过内kube-proxy映射service资源当中的iptables或ipvs规则---发生在客户端的内核，、
+        最终由客户端的内核[netfilter]规则完成后端服务器的调度，
+
+
+    Service的模式：二种
+        模式(为集群上的每个service，提供负载均衡解决方案):
+            usermode: 用户空间{弃用}
+            iptables 
+            ipvs
+    
+    功能：
+        k8s集群中每个节点都作为Service的负载均衡器
+        任何一个节点，都是所有Service的负载均衡器；换句话说，任何一个节点，都可以被用作任何一个Service的访问入口
+        任何一个客户端pod访问某个Service时3，都是以自身所在的节点为目标的访问入口和负载均衡器的
+
+    Service： 
+        模式：usermode/iptables/ipvs
+
+            节点网络：管理负责管理和分配
+                IP地址在节点物理接口
+
+            Service网络，集群网络：由k8s自行管理的
+                IP地址不会配置在任何接口上
+                相关地址只会出现在节点内核的ipvs或iptables规则中
+
+            Pod网络：网络插件管理的[calico,flannal]
+                IP地址配置在Pod的虚拟网络接口上
+        
+            节点内核：
+                三个网络交汇，互相转换的位置，报文的相互转发，来回路由，实现负载均衡
+                服务端工作在Pod网络中
+
+        Service类型:无论哪一种模式都有4种类型
+            1、ClusterIp
+                会被配置一个Service IP的地址，而该地址只能在集群内部中使用
+                客户端：仅可来自集群内部（Pod，有时候也包含节点自己）
+            
+                In Client --> ClusterIP:ServicePort(Service) ---> PodIP:PodPort
+            
+            2、NodePort:
+                会被配置一个Service IP的地址，而该地址只能在集群内部中使用+
+                同时，还会为该类Service配置节点端口，该端口可通过节点IP到达
+                    节点端口与自身的端口一般不会相同
+                    NodePort:30000-32767
+                客户端： 
+                    ClusterIp：来自集群内部（Pod，有时候也包含节点自己）
+                    NodeIP:NodePort: 来自集群外部
+                
+                EX Client[集群外部] ---> NodeIP:NodePort (Service)---> Service ---> PodIP:PodPort
+            
+            3、LoadBalancer: 支持NodePort和ClusterIP
+                作用：自动请求底层IaaS云给我们分配一个LB，LB上所指定的端口与NodePort建立绑定的关系
+                    依赖于外部的LBaaS[负载均衡及服务的功能]，Master可借助cloud-manager向外部的LBaaS的管理API，请求动态创建一个软件LB
+                k8s集群外部的LoadBalancer负责将接入的流量转发至工作节点上的NodePort
+                Ex Client ---> LB IP:LB_Port ---> Node IP:NodePort(Service) ---> PodIP:PodPort
+
+                注意：不理解可以看架构图
+                
+            4、ExternalName:
+                负责将集群外部的服务引入到集群中
+                需要借助于ClusterDNS上的CNAME资源完成记录
+                特殊类型，无需ClusterIP和NodePort,无需定义标签选择器发现Pod对象
+                ServiceName --> CName ---> External Service Name
+
+                外部：
+                    MySQL：mysql.wjs.com
+                内部：
+                    MySQL：mysql.default.svc.cluster.local
+                
+                映射：
+                    In Client ---> mysql.default.svc.cluster.local ---> mysql.wjs.com ---> mysql IP[外部ip地址]
+
+                例如：
+                             
+                    kind: Service
+                    apiVersion: v1
+                    metadata:
+                      name: externalname-redis-svc
+                      namespace: default
+                    spec:
+                      type: ExternalName
+                      externalName: redis.ik8s.io       # 这个名字要被解析成 ip 地址；属于集群外部ip
+                      ports:
+                        - protocol: TCP
+                          port: 6379
+                          targetPort: 6379
+                          nodePort: 0
+                      selector: {}
+        创建Service资源 
+            由Service表示的负载均衡器，主要定义如下：
+                1、负载均衡器入口：ClusterIP及相关的Service Port、NodePort(每一个的Node IP都可用)
+                    根据通信需求，确定选择的类型
+                2、标签选择器：用于筛选Pod，并基于筛选出的Pod的IP生成后端端点列表(被调度的上游端点)
+                3、Service类型的专有配置
+        
+        Service资源规范： 
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: ...
+              namespace: ...
+            spec:
+              type: ClusterIP/NodePort/LoadBalancer/ExternalName            # Service类型，默认为ClusterIP
+              selector:                                                     # 等值类型的标签选择器：内含有 "与" 逻辑【多个标签】
+              ports:                                                        # Service的端口对象列表
+              - name: string/HTTP-80                                        # 端口的名称
+                protoctl: TCP/UDP/SCTP/HTTP                                 # 协议，目前支持TCP/UDP/SCTP/，默认是TCP，SCTP是TCP的增强版，四层协议
+                port: <interger>                                            # Service的端口号
+                targetPort: string                                          # 后端目标进程的端口号或名称，名称需要Pod规范定义
+                nodePort: <interger>                                        # 节点端口号，仅适用于NodePort和LoadBalancer 类型 
+              clusterIP: string                                             # Service的集群IP，建议由系统自动分配
+              externalTrafficPolicy: string                                 # 外部流量策略处理方式，local表示当前节点处理，Cluster表示向集群范围调度
+              LoadBalancerIP: string                                        # 外部负载均衡器的使用的IP地址，仅合适用于 LoadBalancer
+              externalName: string                                          # 外部服务名称，该名称将作为Service的DNS CNAME的值
+
+        Service资源示例：
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: demoapp-nodeport-svc
+            spec:
+              type: ClusterIP/NodePort          # Service的资源类型
+              selector:
+                app: demoapp
+              ports:
+              - name: http-80                   # 端口名称标识
+                protoctl: TCP                   # 支持的协议
+                port: 80                        # service端口
+                targetPort: 80                  # 目标端口，跟后端的节点提供服务的监听端口号
+                nodePort: 31398                 # 集群外部访问的一个随机端口 clusterIP不支持nodePort
+                    
+                注意: nodePort端口开放是在我们正在访问的端口才开放，一般不访问端口是关闭的，只要访问端口才会开启，用ss -ntu命令是可以看到的，不访问这个命令端口是看不到的
+                    
+
+        启动一个测试客户端pod
+            kubectl run clinet-$RANDOM --image ikubertes/admin-box:v1.2 --restart=Never --rm -it --command --/bin/bash
+            容器内部用名称也可以访问：进入容器内部用---curl demoapp-nodeport-svc
+    
+    流量策略：
+        internalTrafficPolicy: 专用于集群内部客户端的流量
+        externalTrafficPolicy: 专用于集群外部客户端的流量
+            可用取值：
+                local: 流量从哪个节点接入，就仅能调度给该节点运行的，由客户端所请求的目标服务后端Pod，性能好，负载均衡能力差
+                cluster: 不关心流量从哪个节点接入，而直接在整个Service的所有Pod上进行流量分发，影响性能，负载均衡能力好
+        
+        NodePort Service流量策略
+            流量策略一: Cluster,标识整个kubernetes集群范围内的调度
+                该流量策略下，请求报文从某个节点上的NodePort进入，该节点上的Service会将其调度至任何一个可用的后端Pod之上
+                ，而不关心Pod运行哪个节点：
+
+        loadBalancer Service流量策略
+            分三步: 
+                1、给Service自己分配一个Cluster IP地址
+                2、申请集群节点，每个节点上绑定一个NodePort
+                3、请求外部的底层的IaaS API，创建一个软件的LB，外部集群的负载均衡器。并且为该负载均衡器分配ip地址 [叫Load Balancer IP]
+            
+            创建loadBalancer示例:
+                kind: Service
+                apiVersion: v1
+                metadata:
+                  name: demoapp-loadbalancer-svc
+                spec:
+                  type: LoadBalancer
+                  externalIPs:                      # 外部IP，某个节点的辅助IP，
+                  - 10.0.0.11                       # 集群外部IP，例如：公网ip，并不是 loadBalancerIP 的ip  ，EXTERNAL-IP那就有值,集群外部可以直接使用该ip地址访问            
+                  selector:
+                    app: demoapp
+                  ports:
+                  - name: http
+                    protocol: TCP
+                    port: 80
+                    targetPort: 80
+                loadBalancerIP: 1.2.3.4             # 外部负载均衡器的IP 
+            -----------------------------------------------------------------------------------------
+                externalIPS: 如果外部的 IP 路由到集群中一个或多个 Node 上，Kubernetes Service 会被暴露给这些 externalIPs。 通过外部 IP（作为目的 IP 地址）进入到集群，
+                             打到 Service 的端口上的流量， 将会被路由到 Service 的 Endpoint 上。 externalIPs 不会被 Kubernetes 管理，它属于集群管理员的职责范畴。
+                            https://kubernetes.io/zh-cn/docs/concepts/services-networking/service
+
+                注意: 如果service ip变动或LB的ip变动，它们俩个是不会联动的，需要第三方工具支持它们俩个的相互联动
+                      第三方工具的作用: 时刻监视Service ip和LB的ip，其中一个ip地址发生变动，另外一个也会随之改变，实现相互联动，目前该工具没发现
+    
+    Service名称解析:
+        Service和Cluster DNS
+            CoreDNS: 动态的完成Service的名称解析 
+                     会自动监视APIservice 上每一个Service资源的创建或变动，并且把每一个service资源的名字与service资源的ClusterIP建立起映射关系
+                        ServiceName --到-> ClusterIP 做 A 记录
+                        ClusterIP --到->  ServiceName 做 PTR 记录，而且还把service端口做一个SVC资源记录
+                        
+            1、Cluster DNS(CoreDNS)是k8s集群的必备附件，负责为k8s提供名称解析和服务发现
+                每个Service资源对象，在CoreDNS上都会自动生成一个遵循 "<service>.<ns>.svc.<zone>" 格式的名称
+                    a、<service>: 当前Service对象的名称
+                    b、<ns>: 当前Service对象所属的名称空间
+                    c、<zone>: 当前k8s集群使用的域名后缀，默认是 "cluster.local"
+                围绕该名称会生成一些DNS格式的资源记录
+            2、CoreDNS会持续监视API Service上的Service资源对象的变动，并实时反映到相关的DNS资源记录中
+            3、Pod中个容器默认会在 /etc/resolv.conf 中，将nameserver指向CoreDNS相关的Service的ClusterIP
+                由kubelet创建Pod时根据指定的配置自动注入
+    
+    Service 在 Cluster DNS上的资源记录:
+        每个Service，在CoreDNS上都会有A/AAAA、SRV[SVR]和PTR资源记录
+            1、A/AAAA资源记录
+                <service>.<ns>.svc.<zone>.<ttl> IN A <cluster-ip>
+                <service>.<ns>.svc.<zone>.<ttl> IN AAAA<cluster-ip>    # ipv6
+            
+            2、每个定义了名称的端口生成一个SRV记录，以支持服务发现
+                _<port>._<proto>.<service>.<ns>.svc.<zone>.<ttl> IN SRV <weight><priority> <prot-number> <service>.<ns>.svc.<zone>.
+            
+            3、为每个 A  记录 (例如：a.b.c.d) 或 AAAA 记录生成对应的PTR记录，例如
+                <d>.<c>.<b>.<a>.in-addr,arpa. <ttl> IN PRT <service>.<ns>.svc.<zone>.
+
+        Pod可基于Service的DNS名称向其发起服务访问请求
+    
+    Pods上的NDS解析策略:
+        k8s支持在单个Pod资源规范上自定义DNS解析策略和配置，并组合生效
+            spec.dnsPolicy: 解析策略
+            spec.Config: 名称解析机制
+
+        DNS解析策略:
+            1、Default: 从运行在的节点继承DNS名称解析相关的配置---------交给节点去解析，这就是为什么pod容器内可以解析www.baidu.com的原因
+                cluster.local 集群内部的域名像这样的交给 10.96.0.10 去解析，再交给 coredns解析
+                coredns本身不解析 www.baidu.com 因为不是本地域[cluster.local]，所以不交给 10.96.0.10 ，直接交给pod所在的节点去解析
+
+            2、ClusterFirst: 集群DNS服务上解析结群内的名称，其他域名的解析则交由从系欸但继承而来的上游名称服务器
+            3、ClusterFirstWithHostNet: 专用于在设置了hostNetwork的Pod对象上使用的ClusterFirst策略
+            4、None: 用于忽略k8s集群的默认设定，而仅使用由 dnsConfig 自定义的配置
+
+        DNS解析机制: 在pod容器中是可以看到以下三项的
+            1、nameserver <[]string>: DNS名称服务器列表，附加于由dnsPolicy生成的DNS名称服务器之后
+            2、searches <[]string>: DNS名称解析时的搜索域，附加由于dnsPolicy生成的搜索域之后
+            3、options <[]string>: DNS解析选项列表，同dnsPolicy生成的解析选项合并最终生效的定义
+                
+
+                a. [root@demoapp-55c5f88dcb-9drfh ~]# cat /etc/resolv.conf 
+                    nameserver 10.96.0.10
+                    search default.svc.cluster.local svc.cluster.local cluster.local   # 这个就是搜索域
+                        比如：ping www 发现没有，于是就在www后面补上后缀default.svc.cluster.local ---> [www.default.svc.cluster.local]，发现还是没有，就补上后缀svc.cluster.local,依次进行
+                    options ndots:5
+
+                b. 10.96.0.10是谁的地址:
+                    [root@master01 chapter7]#kubectl get svc -n kube-system -o wide
+                    NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)                  AGE   SELECTOR
+                    kube-dns   ClusterIP   10.96.0.10   <none>        53/UDP,53/TCP,9153/TCP   16d   k8s-app=kube-dns
+
+                c. kube-system名称空间下的kube-dns的后端端点连接到哪里了：
+                    [root@master01 chapter7]#kubectl describe svc -n kube-system
+
+                d. 后端端点连接到了俩个 coredns 上
+                    [root@master01 chapter7]#kubectl get pod -n kube-system -o wide
+                    NAME                                  READY   STATUS    RESTARTS         AGE   IP            NODE       NOMINATED NODE   READINESS GATES
+                    coredns-565d847f94-dq44p              1/1     Running   7 (4h49m ago)    16d   10.244.0.16   master01   <none>           <none>
+                    coredns-565d847f94-hjlw4              1/1     Running   7 (4h49m ago)    16d   10.244.0.17   master01   <none>           <none>
+            
+            解析过程: 解析集群内部的Service
+                容器内部访问service名称 ----> 10.96.0.10 ----> coredns
+
+                 cluster.local 集群内部的域名像这样的交给 10.96.0.10 去解析，再交给 coredns解析
+                 coredns本身不解析 www.baidu.com 因为不是本地域[cluster.local]，所以不交给 10.96.0.10 ，直接交给节点去解析
+        
+    Headless Service 无头服务: 
+        头：是指-ClusterIP; 无头就是没有 ClusterIP
+        不会分配ClusterIP的Service
+        
+        解析的流程的类型: 
+            1、ServiceName ---> CName (ExternalServiceName) ---> ExternalService IP
+            2、ServiceName ---> (label selector,pod) ---> 所以 Pod 的ip地址
+        
+        例如: 
+            kind: Service
+            apiVersion: v1
+              metadata:
+              name: externalname-redis-svc
+              namespace: default
+            spec:
+              type: ExternalName
+              externalName: redis.ik8s.io       # 这个名字要被解析成 ip 地址；属于集群外部ip
+              ports:
+                - protocol: TCP
+                  port: 6379
+                  targetPort: 6379
+                  nodePort: 0
+              selector: {}
+        例如：  
+        kind: Service
+        apiVersion: v1
+        metadata:
+          name: demoapp-headless-svc
+        spec:
+          clusterIP: None               # 不分配clusterip
+          selector:
+            app: demoapp                # 用标签选择器挑选后端 pod
+          ports:
+          - port: 80
+            targetPort: 80
+            name: http
+
+    Service 流量转发：
+        查看kube-proxy的yaml文件
+        [root@master01 chapter7]#kubectl get configmap kube-proxy -n kube-system -o yaml      
+            iptables:
+            masqueradeAll: false            # 只对请求报文做源地址转换，响应报文不做转换，直接发给客户端，不需要经过 service
+            masqueradeBit: null
+            minSyncPeriod: 0s
+            syncPeriod: 0s
+        
+        流量转发机制：了解就行
+            请求报文，目标地址转换都会进行，未启动 masquerade-all 时，源地址转换视情况进行
+                Pod 网络是虚拟网络，最终还是要通过节点网络完成报文的传送，因此，SNAT 通常会使用节点网络中的地址
+
+# 应用编排工作原理
+    运行和调度应用的原子单元Pod
+    Pod:
+        自主式Pod，由用户直接创建，然后由Scheduler调度到某个节点运行
+            kubelete: Pod 生命周期管理
+                imagePullPolicy
+                imagePullSecrets    habor镜像
+                restartPolicy:     Pod的重启策略 
+                    always
+                    OnFailure
+                    never
+            思考：
+                1、pod被误删
+                2、pod节点宕机
+                    scheduler：调度器，负责调度未完成绑定的Pod,如果这个pod已经被调度，那么scheduler 将不会被调度到其他地方
+
+        
+        工作负载编排控制器：
+            Deployment、SstatefulSet、DaemontSet[每个节点只能允许一个实例]、Job、CronJob
+
+            应用编排:
+                精准确保当前名称空间中，有吻合用户期望的数量的某个应用的Pod实例运行
+                podTemplate：Pod模板
+                selector 选择器
+                replicas 数量
+
+                功能：对应用有部署、应用更新或升级，发版，回滚、卸载 
+
+    控制器模型的工作模式：
+        看图---控制回路
+        https://www.processon.com/diagraming/6365027ae401fd612f4a6e9b
+
+        1、初始，Controller 负责根据 Input ( 目标状态) 控制System,并生成 Output (结果状态)
+        2、Feedback 根据 Output 生成 Feedback Signal 和 Input 来判断是否存在错误，并在有错误时生成 Error Signal
+        3、Error Signal 将驱动 Controller 生成Actuating Signal,并控制 System 的行为与 Input 要求相同
+
+    Kubernetes Controller 的控制回路
+        1、Controller 根据 spec ,控制 System 生成 status
+        2、Controller 借助于 Sensor 持续监视 System 的 spec 和Status,在每一次控制回路中都会对二者进行比较，并确保 System 的 Status 不断逼近或完全等同 Status
+        https://www.processon.com/diagraming/6365027ae401fd612f4a6e9b
+
+    控制器有俩种类型：
+        1、内置控制器：Replicas、Deployment、StatefulSet、DaemonSet、Job和CronJob
+        2、第三方控制器，可以看第三方nfs的控制器，Ingress
+            [root@master01 chapter7]#kubectl get deployments -n kube-system
+    
+    以编排 Pod 化运行的应用为核心的控制器，通常被统称为工作负载型控制器
+        1、无状态应用编排：ReplicaSet、Deployment
+        2、有状态应用编排：StatefulSet，仅为有状态编排提供基础框架  很少用
+            第三方专用的Operator，专用
+                redis，mongdb，promethues，mysql，kafka等
+        3、系统级应用：DaemonSet
+        4、作业类应用：Job和CronJob
+
+# Deployment 应用编排控制器
+    Deployment Controller：Controller-manager中以Daemon运行着的进程
+    Deployment resources: API server中的资源类型，受 Deployment Controller 控制器控制
+        创建多个Deployment资源对象，每个Deployment对象，都是用来编排应用，实际上真正编排Pod的是 ReplicaSet ，rs 只识别标签
+        rs 本身不支持滚动更新，是 Deployment 支持滚动更新
+    
+    命令行创建deployment 资源，再修改成rs资源
+        [root@master01 controller]#kubectl create deployment demoapp --image ikubernetes/demoapp:v1.0 --replicas 2 --dry-run=client -o yaml
+    
+    例如：replicaSet资源,多余
+        apiVersion: apps/v1
+        kind: ReplicaSet
+        metadata:
+          name: replicaset-demo
+        spec:
+          minReadySeconds: 3
+          replicas: 2
+          selector:
+            matchLabels:                                # 高级标签选择器，注意：rs 只识别标签，就算是不同的应用和相同的标签，也只识别标签
+              app: demoapp
+              release: stable
+              version: v1.0
+          template:                                     # 注意：模板中的spec期望状态
+            metadata:
+              labels:
+                app: demoapp
+                release: stable
+                version: v1.0
+            spec:                                       # 注意模板中的标签选择器
+              containers:
+              - name: demoapp
+                image: ikubernetes/demoapp:v1.0
+                ports:
+                - name: http
+                  containerPort: 80
+                livenessProbe:
+                  httpGet:
+                    path: '/livez'
+                    port: 80
+                  initialDelaySeconds: 5
+                readinessProbe:
+                  httpGet:
+                    path: '/readyz'
+                    port: 80
+                  initialDelaySeconds: 15
+
+        修改nginx的标签跟demoapp的标签一样，会发现nginx的pod被干掉了，无论nginx的Pod重启策略是Always还是什么，还是会被干掉
+            kubectl label pods nginx  app=demoapp -n demo
+
+        回滚更新:
+            kubectl explain deployment.spec.strategy
+            Deployment的滚动更新策略：
+                strategy：回滚更新策略
+                    rollingUpdate
+                        maxSurge：指定升级期间存在的总pod对象数量最多可超出期望值的个数，其值可以是0或正整数，也可以是相对于期望值的一个百分比
+                            可安排在所需pods数之上的最大pods数。Value可以是一个绝对数字(如:5)或所需pods的百分比(如:10%)。
+                            如果MaxUnavailable为0，则该值不能为0。绝对数字由百分数四舍五入计算。默认为25%。示例:当设置为30%时，
+                            滚动更新开始时，新的replicset可以立即扩大，这样旧的和新的pods的总数不超过所需pods的130%。
+                            一旦旧的pods被杀死，新的replicset可以进一步扩大，确保在更新期间任何时候运行的pods总数最多是所需pods的130%。
+                             0: 表示不能超出期望个数
+                            
+                        maxUnavailable: 升级期间正常可用的Pod副本数(包括新旧版本)最多不能低于期望值的个数，其值也可以是0或正整数，也可以是相对于期望值的一个百分比 ，默认值为1
+                            更新期间不可用pods的最大数量。Value可以是一个绝对数字(如:5)或所pods的百分比(如:10%)。绝对数字由百分数向下舍入计算。
+                            如果MaxSurge为0，则该值不能为0。默认为25%。例如:当这个值设置为30%时，当滚动更新开始时，旧的replicset可以立即缩小到所需pods的70%。
+                            一旦新pods准备好了，旧的replicset可以进一步缩小，然后扩大新的replicset，确保在更新期间所有时间可用pods的总数至少是所pods的70%
+                        
+                        例如：先添加后删除，0表示不删除
+                            maxSurge：1
+                            maxUnavailable: 0
+
+                            先删除再添加，0表示不添加
+                            maxSurge：0     
+                            maxUnavailable: 1
+
+                            允许少1个，又允许多一个，先删再添加2个
+                            maxSurge：1
+                            maxUnavailable: 1                    
+                    type:
+                        Recreate：在创建新的Pod之前，kill掉所有的pod
+                        RollingUpdate：使用滚动更新将旧的副本集替换为新的副本集，即逐步缩小旧的副本集，扩大新的副本集。
+
+                    默认：查看默认的strategy的参数
+                        kubectl describe deployment demo -n demo
+
+                    例如：
+                        apiVersion: apps/v1
+                        kind: Deployment
+                        metadata:
+                          labels:
+                            app: demo
+                          name: demo
+                          namespace: demo
+                        spec:
+                          replicas: 2
+                          selector:
+                            matchLabels:
+                              app: demo
+                          strategy:                           # 默认的策略是RollingUpdate：25% max unavailable, 25% max surge
+                            rollingUpdate: 
+                              maxSurge: 25%
+                              maxUnavailable: 25%
+                            type: RollingUpdate
+                          template:
+                            metadata:
+                              labels:
+                                app: demo
+                            spec:
+                              containers:
+                              - image: ikubernetes/demoapp:v1.0
+                                name: demoapp
+                                resources: {}
+
+        在线更新，滚动，升级应用：
+            可以看下Typora笔记中的Deployment
+            升级操作：
+                1、先创建pod
+                2、先建立一个service的clusterip
+                3、创建一个客户端pod去访问创建的4个应用pod
+            回滚：
+                如果发现升级之后的版本有问题，可以执行回滚操作，之前旧版本的 demo 一直存在，没有被删除
+
+            查看历史
+                kubectl rollout history deployment -n demo
+            查看更新的状态
+                kubectl rollout status deployment demo -n demo
+            暂停操作，做金丝雀发布
+                kubectl apply -f deployment-strategy.yaml && kubectl rollout pause deployment demo -n demo
+            继续操作并且查看状态
+                kubectl rollout resume deployment demo -n demo && kubectl rollout status deployment demo -n demo
+            回滚，回滚上一个版本
+                kubectl rollout undo deployment demo -n demo
+            回滚到指定版本
+                kubectl rollout undo --to-revision=1 deployment demo -n demo
+
+# DaemonSet：部署系统级的应用
+    每个节点能且仅能运行应用一个实例
+        每个节点：
+            1、集群中每个节点
+            2、nodeSelector：可被节点选择器匹配到的节点范围内的每个节点
+        滚动更新：
+            更新策略：一般应为先删除一组节点上的实例，更新完成后，再进行下一组节点
+    应用场景：
+        1、特定类型的系统化应用，例如：kube-proxy,以及Calico网络插件的节点代理calico-node 
+        2、集群存储守护进程、集群日志收集守护进程以及节点监控守护进程等
+    例如：
+        [root@master01 update-rollback]#cat daemonset-promethues.yaml 
+        apiVersion: apps/v1
+        kind: DaemonSet
+        metadata:
+          name: promethus-ds
+          namespace: prom
+          labels:
+            app: prometheus
+            component: node-exporter
+        spec:
+          selector:
+            matchLabels:
+            app: prometheus
+            component: node-exporter
+          template:
+            metadata:
+            name: prometheus-node-exporter
+            labels:
+                app: prometheus
+                component: node-exporter
+            spec:
+            containers:
+            - image: prom/node-exporter:v0.18.0
+                name: prometheus-node-exporter
+                ports:
+                - name: prom-node-exp
+                  containerPort: 9100
+                  hostPort: 9100
+                livenessProbe:
+                  tcpSocket:
+                    port: prom-node-exp
+                  initialDelaySeconds: 3
+                readinessProbe:
+                  httpGet:
+                    path: '/metrics'
+                    port: prom-node-exp
+                    scheme: HTTP
+                initialDelaySeconds: 5
+            hostNetwork: true               #共享节点网络
+            hostPID: true                   #共享节点进程
+    可以了解的
+    Argo项目：Rollout
+        OpenKruise项目：阿里开发，支持Rollout 甚至更丰富的控制器
+
+# StatefulSet
+    编排有状态的应用：提供了基础的框架：比如MySQL主从赋值
+        1、为每个Pod提供一个唯一标识；比如用 headless 无头服务
+        2、为每个Pod提供一个专用的存储（PVC）；不能是Pod template,必须是PVC template
+            文件系统：必须是RWX,ROX；
+            块设备：小心使用
+        3、应用的集群的运维操作步骤，需要由用户自行编排脚本或程序完成，MySQL repl cluster
+            解决办法：使用专有、功能完备的 Operator
+                Operator功能:
+                    拆装Cluster
+                    自动完成扩缩容中的每个必要步骤
+                    备份，恢复
+
+                     声明式API，依赖于自定义的资源类型来完成相应功能的支撑
+
+            Operator功能相关的网站：https://github.com/operator-framework/awesome-operators
+            Operator官网：https://operatorhub.io/
+
+# Job和CronJob
+    Job: 负责编排运行有结束时间的 "一次性" 任务
+    CronJob：建立在Job的功能之上，更高层级的控制器，它以Job控制器完成单批次的任务编排，而后为这种Jpb作业提供需要运行的周期定义
+
+    Job资源规范：
+        Job资源同样需要标签选择器和Pod模板，但它不需要指定replicas，而是应该complections，
+        即需要完成的作业次数，默认为1次
+            1、Job资源会为其Pod对象自动添加 "Job-name=Job_name" 和 "controller-uid=UID" 标签，
+               并使用标签选择器完成对controller-uid 标签的关联，因此，selector并非必选字段
+            2、Pod名称格式：`$(Job-name)-$(index)-$(random-string)`,其中的$(index)字段取值与completions
+               和completionMode 有关
+            注意： 
+                1、job资源所在的群组为 "batch/v1"
+                2、job资源中，Pod的RestartPolicy的取值只能为Never或OnFailure
+            实例：默认单位都是秒
+                apiVersion: batch/v1                    #API群组及版本
+                kind: Job
+                metadata:
+                  name: string                          #资源名称，在作用域中要唯一
+                  namespace: string                     #名称空间，job资源录属于名称空间级别
+                spec:
+                  selector:                             #标签选择器，必须匹配字段template字段中Pod模板中的标签
+                  template:                             #Pod模板对象
+                  completions: integer                  #期望的成功完成的作业次数，成功运行结束的Pod数量
+                  completionMode: string                #追踪Pod完成的模式，支持Indexed和NonIndex(默认)俩种
+                  ttlSecondsAfterFinished: integer      #终止状态作业的生存时长，超期将被删除
+                  parallelism: integer                  #作业的最大并行度，默认为1
+                  backoffLimit: integer                 #将作业标记为 "Failed" 之前的重试次数，默认为6次
+                  activeDeadlineSeconds: integer        #作业启动后可处于活动状态的时长
+                  suspend: boolean                      #是否挂起当前Job的执行，挂起作业会重置StartTime字段的值
+            比如：
+                apiVersion: batch/v1
+                kind: Job
+                metadata:
+                  name: job-demo
+                spec:
+                  template:
+                    spec:
+                    containers:
+                    - name: myjob
+                        image: alpine:3.11
+                        imagePullPolicy: IfNotPresent
+                        command: ["/bin/sh", "-c", "sleep 60"]
+                    restartPolicy: Never
+                  completions: 2
+                  completions: 11
+                  parallelism: 3
+                  ttlSecondsAfterFinished: 3600
+                  backoffLimit: 3
+                  activeDeadlineSeconds: 300
+                
+                Job对象可以支持多个Pod的可靠、并发执行
+                    1、常见常见有：发电子邮件，渲染视频帧，编码文件，NoSQL数据库中扫描主键范围
+                并行job的关键参数：
+                    completions: 11
+                    parallelism: 3
+
+    CronJob：
+        1、CronJob控制器用于管理Job资源的运行时间，它允许用户在特定的时间或以指定的间隔运行Job
+        2、CronJob控制器的功能类似于linux操作系统的周期性任务作业计划（crontab），用于控制作业运行的时间点及周期性运行的方式：
+            ◼ 仅在未来某时间点将指定的作业运行一次
+            ◼ 在指定的周期性时间点重复运行指定的作业
+        3、CronJob资源也是标准的API资源类型
+        注意：
+            ◼ 在CronJob中，通配符“?”和“*”的意义相同，它们都表示任何可用的有效值
+        
+        实例：默认单位都是秒
+            apiVersion: batch/v1 # API群组及版本；
+            kind: CronJob # 资源类型特有标识；
+            metadata:
+              name <string> # 资源名称，在作用域中要惟一；
+              namespace <string> # 名称空间；CronJob资源隶属名称空间级别；
+            spec:
+              jobTemplate <Object> # job作业模板，必选字段；
+                metadata <object> # 模板元数据；
+                spec <object> # 作业的期望状态；
+              schedule <string> # 调度时间设定，必选字段；
+              concurrencyPolicy <string> # 并发策略，可用值有Allow、Forbid和Replace；
+              failedJobsHistoryLimit <integer> # 失败作业的历史记录数，默认为1；
+              successfulJobsHistoryLimit <integer> # 成功作业的历史记录数，默认为3；
+              startingDeadlineSeconds <integer> # 因错过时间点而未执行的作业的可超期时长；
+              suspend <boolean> # 是否挂起后续的作业，不影响当前作业，默认为false；
+        比如：
+            apiVersion: batch/v1beta1
+            kind: CronJob
+            metadata:
+              name: cronjob-demo
+              namespace: default
+            spec:
+              schedule: "*/2 * * * *"                               #每2分钟执行
+              jobTemplate:
+                metadata:
+                labels:
+                    controller: cronjob-demo
+                spec:
+                parallelism: 1
+                completions: 1
+                ttlSecondsAfterFinished: 600
+                backoffLimit: 3
+                activeDeadlineSeconds: 60
+                template:
+                    spec:
+                    containers:
+                    - name: myjob
+                        image: alpine
+                        command:
+                        - /bin/sh
+                        - -c
+                        - date; echo Hello from CronJob, sleep a while...; sleep 10
+                    restartPolicy: OnFailure
+            startingDeadlineSeconds: 300
+                        
+# k8s安全控制体系
+    https://www.processon.com/diagraming/6365027ae401fd612f4a6e9b
+
+    API Server及其各客户端的通信模型
+        1、API Server是Kubernetes集群的网关，是能够与etcd通信惟一入口；
+            ◼ kube-controller-manager、kube-scheduler、kubelet、kube-proxy，以及后续部署的集群插件CoreDNS、Project 
+                Calico等，彼此间互不通信，彼此间的所有协作均经由API Server的REST API进行，它们都是API Server的客户端
+            ◼ 确保对API Server的安全访问至关重要
+                ◆客户端对API Server的访问应经过身份验证及权限检查；
+                ◆为防止中间人攻击，各类客户端与API Server间的通信都应使用TLS进行加密
+                    TLS加密：相互通信的双方进行加密
+        2、各kubelet也会监听一些套接字，提供一个小型的REST API
+            ◼ 10250是具有所在节点上Pod管理权限的读写端口，应谨慎管理
+            ◼ 10255仅提供只读操作，是REST API的子集
+            ◼ 另外，10248是本地healthz端点使用的端口
+    
+    API Server内置的访问控制机制
+        1、API Server内置了一个有着三级别的访问控制机制
+            ◼ 认证：核验请求者身份的合法性
+            ◼ 授权：核验请求的操作是否获得许可
+            ◼ 准入控制：检查操作内容是否合规
+            注意：认证和授权是读操作，准入控制是写操作
+
+        2、插件化机制，每种访问控制机制均有一组专用的插件栈
+            ◼ 认证：身份核验过程遵循“或”逻辑，且任何一个插件核验成功后都将不再进行后续的插件验证
+                ◆均不成功，则失败，或以“匿名者”身份访问
+                ◆建议禁用“匿名者”
+            ◼ 授权：鉴权过程遵循“或”逻辑，且任何一个插件对操作的许可授权后都将不再进行后续的插件验证
+                ◆均未许可，则拒绝请求的操作
+            ◼ 准入控制：内容合规性检查过程遵循“与”逻辑，且无论成败，每次的操作请求都要经由所有插件的检验
+                ◆将数据写入etcd前，负责检查内容的有效性，因此仅对“写”操作有效
+                ◆分两类：validating（校验）和 mutating（补全或订正）
+
+            认证的流程：
+            api-Requst ---> authentication --->Authorzation ---> Admission Control---> etcd
+    
+    API身份的认证
+        Kubernetes上的用户
+            1、“用户”即服务请求者的身份指代，一般使用身份标识符进行识别
+                ◼ 用户标识：用户名或者ID
+                ◼ 用户组
+            2、Kubernetes系统的用户大体可分为 2 类
+                ◼ Service Account：服务账户，指Pod内的进程访问API Server时使用的身份信息
+                    ◆API Server使用ServiceAccount类型的资源对象来保存该类账号
+                    ◆认证到API Server的认证信息称为Service Account Token，它们保存于同名的专用类型的Secret对象中
+                    ◆名称空间级别
+                ◼ User Account：用户账户，指非Pod类的客户端访问API Server时使用的身份标识，一般是现实中的“人”
+                    ◆ API Server没有为这类账户提供保存其信息的资源类型，相关的信息通常保存于外部的文件或认证系统中
+                    ◆身份核验操作可由API Server进行，也可能是由外部身份认证服务完成
+                    ◆本身非由Kubernetes管理，因而作用域为整个集群级别
+                
+            3、不能被识别为Service Account，也不能被识别为User Account的用户，即“匿名用户”
+
+    身份认证策略
+        1、X.509客户端证书认证
+        2、持有者令牌（bearer token）
+            ◼ 静态令牌文件（Static Token File）
+            ◼ Bootstrap令牌
+            ◼ Service Account令牌
+            ◼ OIDC（OpenID Connect）令牌
+            ◼ Webhook令牌
+        3、身份认证代理（Authenticating Proxy）
+        4、匿名请求
+
+        k8s系统的各组件，启动时，通常需要加载配置信息
+            1、二进制安装从何处加载：
+                命令行
+                配置文件
+            2、kubeadm部署，以静态Pod形式运行：
+                命令行参数：
+                    command
+                    args
+                配置文件怎么加载：
+                    confmap
+                    secret
+            注意：静态Pod也有配置文件，但其定义不需要提交给API Server 可由 kubelet (node资源类型)自行创建并运行为pod，比如kube-apiserver中的yaml文件：kind Node
+                /etc/kubernetes/manifests/  这个目录下的文件由 kubelet 周期性读取
+
+    API Server启用的身份认证机制
+        1、基于认证插件支持多种认证方式，而相应认证插件的启用需要经由kube-apiserver上的专用选项完成
+        2、kubeadm v1.22 部署的集群默认启用的认证机制如右图红框中的选项，它们依次是：在apiserver的yaml文件中可以看得出来
+            ◼ X509客户端证书认证：--client-ca-file=/etc/kubernetes/pki/ca.crt
+            ◼ Bootstrap令牌认证：--enable-bootstrap-token-auth=true
+            ◼ 身份认证代理：
+                - --proxy-client-cert-file=/etc/kubernetes/pki/front-proxy-client.crt
+                - --proxy-client-key-file=/etc/kubernetes/pki/front-proxy-client.key
+                - --requestheader-allowed-names=front-proxy-client
+                - --requestheader-client-ca-file=/etc/kubernetes/pki/front-proxy-ca.crt
+                - --requestheader-extra-headers-prefix=X-Remote-Extra-
+                - --requestheader-group-headers=X-Remote-Group
+                - --requestheader-username-headers=X-Remote-User
+            ◼ Service Account认证：
+                - --service-account-issuer=https://kubernetes.default.svc.cluster.local
+                - --service-account-key-file=/etc/kubernetes/pki/sa.pub
+                - --service-account-signing-key-file=/etc/kubernetes/pki/sa.key
+
+        3、注意：API Server并不保证各认证插件的生效次序与定义的次序相同
+    
+    kubelet启用的身份认证机制
+        1、kubelet的REST API端点默认通过TCP协议的10250端口提供，支持管理操作
+            Kubelet API                     功能简介
+                /pods                   列出当前kubelet节点上的Pod
+                /run                    在一个容器内运行指定的命令
+                /exec                   在一个容器内运行指定的命令
+                /configz                设置Kubelet的配置文件参数
+                /debug                  调试信息
+        2、需要对客户端身份进行认证
+            启用的身份认证
+                ◆webhook
+                ◆x509客户端证书认证
+                ◆注意：建议显式禁用匿名用户
+            API Server是该API端点的客户端，因此，kubelet需要在验证客户端身份时信任给API Server颁发数字证书的CA
+
+    身份认证策略(2)
+        1、X.509数字证书认证
+            ◼ 在双向TLS通信中，客户端持有数字证书，而API Server信任客户端证书的颁发者
+                ◆信任的CA，需要在kube-apiserver程序启动时，通过--client-ca-file选项传递
+            ◼ 认证通过后，客户端数字证书中的CN（Common Name）即被识别为用户名，而O（Organization）被识别为组名
+            ◼ kubeadm部署的Kubernetes集群，默认使用 /etc/kubernetes/pki/ca.crt 进行客户端认证
+                ◆/etc/kubernetes/pki/ca.crt是kubeadm为Kubernetes各组件间颁发数字证书的CA
+
+        2、静态令牌文件
+            ◼ 令牌信息保存于文本文件中
+            ◼ 由kube-apiserver在启动时通过--token-auth-file选项加载
+            ◼ 加载完成后的文件变动，仅能通过重启程序进行重载，因此，相关的令牌会长期有效
+            ◼ 客户端在HTTP请求中，通过“Authorization Bearer TOKEN”标头附带令牌令牌以完成认证
+
+    身份认证策略(3)
+        1、Service Account令牌
+            ◼ 该认证方式将由kube-apiserver程序内置直接启用
+            ◼ 它借助于经过签名的Bearer Token来验证请求
+                ◆签名时使用的密钥可以由--service-account-key-file选项指定，也可以默认使用API Server的tls私钥
+            ◼ 用于将Pod认证到API Server之上，以支持集群内的进程与API Server通信
+                ◆Kubernetes可使用ServiceAccount准入控制器自动为Pod关联ServiceAccount
+        2、OpenID Connect（OIDC）令牌
+            ◼ OAuth2认证机制，通常由底层的IaaS服务所提供
+        3、Webhook令牌认证
+            ◼ 是一种用于验证Bearer Token的回调机制
+            ◼ 能够扩展支持外部的认证服务，例如LDAP等
+        4、身份认证代理
+            ◼ 由kube-apiserver从请求报文的特定HTTP标头中识别用户身份，相应的标头名称可由特定的选项配置指定
+            ◼ kube-apiserver应该基于专用的CA来验证代理服务器身份        
+
+# 身份认证测试
+    静态令牌认证-token
+        1、静态令牌认证的基础配置
+            ◼ 令牌信息保存于文本文件中
+                ◆文件格式为CSV，每行定义一个用户，由“令牌、用户名、用户ID和所属的用户组”四个字段组成，用户组为可选字段
+                ◆格式：token,user,uid,"group1,group2,group3"
+            ◼ 由kube-apiserver在启动时通过 --token-auth-file 选项加载
+            ◼ 加载完成后的文件变动，仅能通过重启程序进行重载，因此，相关的令牌会长期有效
+            ◼ 客户端在HTTP请求中，通过“Authorization Bearer TOKEN”标头附带令牌令牌以完成认证
+
+        配置示例
+            ① 生成token，命令：echo "$(openssl rand -hex 3).$(openssl rand -hex 8)" 
+            ② 生成static token文件
+            ③ 配置kube-apiserver加载该静态令牌文件以启用相应的认证功能
+            ④ 测试，命令：curl -k -H "Authorization: Bearer TOKEN" -k https://API_SERVER:6443/api/v1/namespaces/default/pods/
+
+    X509客户端认证数字证书
+        1、X509客户端认证依赖于PKI证书体系，kubeadm部署Kubernetes集群时会自动生成所需要的证书，它们位于/etc/kubernetes/pki目录下
+        2、依赖到的PKI体系：https://www.processon.com/diagraming/6365027ae401fd612f4a6e9b
+        3、另外，对Service Account的token进行签名还需要用到一个可选的密钥对儿
+    
+    X509客户端认证案例：
+        1、X509数字证书认证测试
+            创建客户端私钥和证书签署请求，为了便于说明问题，以下操作在master节点上以/etc/kubernetes/为工作目录
+                ① 生成私钥： (umask 077; openssl genrsa -out ./pki/mason.key 4096)
+                ② 创建证书签署请求： openssl req -new -key ./pki/mason.key -out ./pki/mason.csr -subj "/CN=mason/O=developers"
+                ③ 由Kubernetes CA签署证书： openssl x509 -req -days 365 -CA ./pki/ca.crt -CAkey ./pki/ca.key -CAcreateserial -in ./pki/mason.csr -out ./pki/mason.crt
+                ④ 将pki目录下的mason.crt、mason.key和ca.crt复制到某部署了kubectl的主机上，即可进行测试
+                    这里以k8s-node01为示例；只需要复制mason.crt和mason.key即可，因为集群工作节点上已经有cr.crt文件
+                    命令：scp -rp ./pki/{mason.crt,mason.key} k8s-node01:/etc/kubernetes/pki
+            在k8s-node01上发起访问测试
+                ① 使用kubectl测试：kubectl get pods --client-certificate=$HOME/.certs/mason.crt --client-key=$HOME/.certs/mason.key --server=https://kubeapi.wjs.com:6443/ --certificate-authority=/etc/kubernetes/pki/ca.crt
+                ② 也可以使用curl命令进行测试
+                    curl --cert ./mason.crt --key ./mason.key --key-type PEM --cacert ./ca.crt https://kubeapi.wjs.com:6443
+
+            例如：
+                普通用户：
+                (umask 077; openssl genrsa -out ./pki/mason.key 4096)
+                openssl req -new -key ./pki/mason.key -out ./pki/mason.csr -subj "/CN=mason/O=developers"
+                openssl x509 -req -days 365 -CA ./pki/ca.crt -CAkey ./pki/ca.key -CAcreateserial -in ./pki/mason.csr -out ./pki/mason.crt
+                curl --cert ./mason.crt --key ./mason.key --key-type PEM --cacert ./ca.crt https://kubeapi.wjs.com:6443
+
+                管理员权限：system:masters
+                (umask 077; openssl genrsa -out ./pki/trump.key 4096)
+                openssl req -new -key ./pki/trump.key -out ./pki/trump.csr -subj "/CN=trump/O=system:masters"
+                openssl x509 -req -days 365 -CA ./pki/ca.crt -CAkey ./pki/ca.key -CAcreateserial -in ./pki/trump.csr -out ./pki/trump.crt
+                curl --cert ./trump.crt --key ./trump.key --key-type PEM --cacert ./ca.crt https://kubeapi.wjs.com:6443 get pods 
+
+                官网文档：https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/rbac/
